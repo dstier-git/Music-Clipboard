@@ -8,6 +8,29 @@ import sys
 from pathlib import Path
 import shutil
 
+# Try to import automation libraries
+try:
+    import pyautogui
+    # Disable pyautogui failsafe (the mouse moving to corner)
+    pyautogui.FAILSAFE = False
+    PYAUTOGUI_AVAILABLE = True
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
+
+try:
+    from pywinauto import Application
+    PYWINAUTO_AVAILABLE = True
+except ImportError:
+    PYWINAUTO_AVAILABLE = False
+
+# Try Windows API for additional fallback
+try:
+    import win32gui
+    import win32con
+    WIN32_AVAILABLE = True
+except ImportError:
+    WIN32_AVAILABLE = False
+
 # Output directory for extracted files
 OUTPUT_DIR = r"C:\Users\janet\Desktop\Music-Clipboard\clipboard-full\txts"
 
@@ -130,11 +153,36 @@ class MuseScoreExtractorApp:
         watch_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
         ttk.Button(watch_frame, text="Browse...", command=self.browse_watch_folder).grid(row=0, column=2, padx=5)
         
+        # Automation button row
+        automation_frame = ttk.Frame(watch_frame)
+        automation_frame.grid(row=1, column=0, columnspan=3, pady=5, sticky=tk.W)
+        
+        self.save_selection_button = ttk.Button(
+            automation_frame, 
+            text="Trigger Save Selection in MuseScore", 
+            command=self.trigger_save_selection
+        )
+        self.save_selection_button.grid(row=0, column=0, padx=5)
+        
+        if not PYAUTOGUI_AVAILABLE or not PYWINAUTO_AVAILABLE:
+            self.save_selection_button.config(state='disabled')
+            missing_libs = []
+            if not PYWINAUTO_AVAILABLE:
+                missing_libs.append("pywinauto")
+            if not PYAUTOGUI_AVAILABLE:
+                missing_libs.append("pyautogui")
+            ttk.Label(
+                automation_frame, 
+                text=f"(Install: pip install {' '.join(missing_libs)})", 
+                foreground="gray", 
+                font=("Arial", 8)
+            ).grid(row=0, column=1, padx=5)
+        
         self.watch_button = ttk.Button(watch_frame, text="Start Watching", command=self.toggle_watch)
-        self.watch_button.grid(row=1, column=0, columnspan=3, pady=10)
+        self.watch_button.grid(row=2, column=0, columnspan=3, pady=10)
         
         self.watch_status_label = ttk.Label(watch_frame, text="Status: Not watching", foreground="gray")
-        self.watch_status_label.grid(row=2, column=0, columnspan=3)
+        self.watch_status_label.grid(row=3, column=0, columnspan=3)
         
         # Instructions
         instructions = """
@@ -145,13 +193,15 @@ Instructions:
    - Click 'Extract' to process
 2. Auto Mode (Save Selection): 
    - Set the watch folder (where MuseScore saves selections)
-   - In MuseScore: Select measures → File → Save Selection
-   - The app will automatically process new files
+   - In MuseScore: Select the measures you want to extract
+   - Click 'Trigger Save Selection in MuseScore' button (or manually: File → Save Selection)
+   - Complete the save dialog in MuseScore
+   - The app will automatically process the new file if watching is enabled
    - Click 'Start Watching' to begin monitoring
    - Note: Saved selections already contain only selected measures
         """
         ttk.Label(watch_frame, text=instructions.strip(), justify=tk.LEFT, foreground="gray").grid(
-            row=3, column=0, columnspan=3, pady=10, sticky=tk.W
+            row=4, column=0, columnspan=3, pady=10, sticky=tk.W
         )
         
         # Output Section
@@ -366,6 +416,262 @@ Instructions:
                 if self.watching:  # Only log if still watching
                     self.log(f"Error watching folder: {str(e)}\n")
                 time.sleep(2)
+    
+    def trigger_save_selection(self):
+        """Trigger Save Selection in MuseScore by sending keyboard shortcut"""
+        if not PYWINAUTO_AVAILABLE or not PYAUTOGUI_AVAILABLE:
+            messagebox.showerror(
+                "Missing Dependencies",
+                "This feature requires pywinauto and pyautogui.\n\n"
+                "Install them with:\n"
+                "pip install pywinauto pyautogui"
+            )
+            return
+        
+        # Run in a separate thread to avoid freezing UI
+        thread = threading.Thread(target=self._trigger_save_selection_thread, daemon=True)
+        thread.start()
+    
+    def _trigger_save_selection_thread(self):
+        """Thread function to trigger Save Selection"""
+        app = None
+        main_window = None
+        
+        try:
+            self.log("Attempting to trigger Save Selection in MuseScore...")
+            self.log("Step 1: Finding MuseScore window...")
+            
+            # Find MuseScore window using pywinauto - try multiple methods
+            found = False
+            methods_tried = []
+            
+            # Method 1: Try by title with UIA backend
+            try:
+                app = Application(backend="uia").connect(title_re=".*MuseScore.*", found_index=0)
+                methods_tried.append("UIA backend by title")
+                found = True
+                self.log("✓ Found MuseScore window (UIA backend by title)")
+            except Exception as e:
+                methods_tried.append(f"UIA by title failed: {str(e)[:50]}")
+            
+            # Method 2: Try by process name
+            if not found:
+                try:
+                    app = Application(backend="uia").connect(path="MuseScore4.exe")
+                    methods_tried.append("UIA backend by process")
+                    found = True
+                    self.log("✓ Found MuseScore process (UIA backend)")
+                except Exception as e:
+                    methods_tried.append(f"UIA by process failed: {str(e)[:50]}")
+            
+            # Method 3: Try win32 backend
+            if not found:
+                try:
+                    app = Application(backend="win32").connect(title_re=".*MuseScore.*")
+                    methods_tried.append("Win32 backend")
+                    found = True
+                    self.log("✓ Found MuseScore window (Win32 backend)")
+                except Exception as e:
+                    methods_tried.append(f"Win32 failed: {str(e)[:50]}")
+            
+            # Method 4: Try without backend specification
+            if not found:
+                try:
+                    app = Application().connect(title_re=".*MuseScore.*")
+                    methods_tried.append("Default backend")
+                    found = True
+                    self.log("✓ Found MuseScore window (default backend)")
+                except Exception as e:
+                    methods_tried.append(f"Default failed: {str(e)[:50]}")
+            
+            # Method 5: Try using Windows API to find window handle
+            if not found and WIN32_AVAILABLE:
+                try:
+                    def enum_handler(hwnd, ctx):
+                        if win32gui.IsWindowVisible(hwnd):
+                            window_text = win32gui.GetWindowText(hwnd)
+                            if 'MuseScore' in window_text:
+                                ctx.append((hwnd, window_text))
+                    
+                    windows = []
+                    win32gui.EnumWindows(enum_handler, windows)
+                    
+                    if windows:
+                        hwnd, window_text = windows[0]
+                        # Try to connect using handle
+                        try:
+                            app = Application().connect(handle=hwnd)
+                            found = True
+                            self.log(f"✓ Found MuseScore window using Windows API: '{window_text}'")
+                        except:
+                            pass
+                except Exception as e:
+                    methods_tried.append(f"Windows API failed: {str(e)[:50]}")
+            
+            if not found:
+                self.log("✗ Could not find MuseScore window")
+                self.log("Methods tried:")
+                for method in methods_tried:
+                    self.log(f"  - {method}")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "MuseScore Not Found",
+                    "Could not find a running MuseScore window.\n\n"
+                    "Please ensure MuseScore 4 is open with a score loaded and try again.\n\n"
+                    "Check the output log for details."
+                ))
+                return
+            
+            # Get the main window
+            self.log("Step 2: Accessing main window...")
+            try:
+                main_window = app.top_window()
+                window_title = main_window.window_text()
+                self.log(f"✓ Found window: '{window_title}'")
+            except Exception as e:
+                self.log(f"✗ Error accessing window: {str(e)}")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Error",
+                    f"Could not access MuseScore window: {str(e)}"
+                ))
+                return
+            
+            # Activate the window - try multiple methods
+            self.log("Step 3: Activating MuseScore window...")
+            activated = False
+            
+            # Method 1: set_focus
+            try:
+                main_window.set_focus()
+                time.sleep(0.5)  # Give it more time to activate
+                activated = True
+                self.log("✓ Activated using set_focus()")
+            except Exception as e:
+                self.log(f"  set_focus() failed: {str(e)[:50]}")
+            
+            # Method 2: set_foreground
+            if not activated:
+                try:
+                    main_window.set_foreground()
+                    time.sleep(0.5)
+                    activated = True
+                    self.log("✓ Activated using set_foreground()")
+                except Exception as e:
+                    self.log(f"  set_foreground() failed: {str(e)[:50]}")
+            
+            # Method 3: restore and activate
+            if not activated:
+                try:
+                    main_window.restore()
+                    main_window.set_focus()
+                    time.sleep(0.5)
+                    activated = True
+                    self.log("✓ Activated using restore() + set_focus()")
+                except Exception as e:
+                    self.log(f"  restore() + set_focus() failed: {str(e)[:50]}")
+            
+            # Method 4: Use Windows API to bring to front
+            if not activated and WIN32_AVAILABLE:
+                try:
+                    hwnd = main_window.handle
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    win32gui.SetForegroundWindow(hwnd)
+                    win32gui.BringWindowToTop(hwnd)
+                    time.sleep(0.5)
+                    activated = True
+                    self.log("✓ Activated using Windows API")
+                except Exception as e:
+                    self.log(f"  Windows API activation failed: {str(e)[:50]}")
+            
+            if not activated:
+                self.log("⚠ Warning: Could not activate window, but continuing anyway...")
+            
+            # Additional delay to ensure window is ready
+            time.sleep(0.5)  # Increased delay
+            
+            # Send keyboard shortcut - try multiple methods
+            self.log("Step 4: Sending keyboard shortcut Ctrl+Shift+S...")
+            shortcut_sent = False
+            
+            # Method 1: Use pywinauto's send_keystrokes (more reliable for specific window)
+            try:
+                # Ensure window is still focused
+                main_window.set_focus()
+                time.sleep(0.2)
+                main_window.type_keys('^+s', with_spaces=False, pause=0.1)
+                shortcut_sent = True
+                self.log("✓ Sent shortcut using pywinauto type_keys()")
+            except Exception as e:
+                self.log(f"  pywinauto type_keys() failed: {str(e)[:50]}")
+            
+            # Method 1b: Try alternative pywinauto syntax
+            if not shortcut_sent:
+                try:
+                    main_window.set_focus()
+                    time.sleep(0.2)
+                    # Try with different syntax - send_keys is a method on the window
+                    main_window.send_keystrokes('^+s')
+                    shortcut_sent = True
+                    self.log("✓ Sent shortcut using pywinauto send_keystrokes()")
+                except Exception as e:
+                    self.log(f"  pywinauto send_keystrokes() failed: {str(e)[:50]}")
+            
+            # Method 2: Use pyautogui (global)
+            if not shortcut_sent:
+                try:
+                    # Make sure we're still focused on the window
+                    main_window.set_focus()
+                    time.sleep(0.2)
+                    pyautogui.hotkey('ctrl', 'shift', 's')
+                    shortcut_sent = True
+                    self.log("✓ Sent shortcut using pyautogui hotkey()")
+                except Exception as e:
+                    self.log(f"  pyautogui hotkey() failed: {str(e)[:50]}")
+            
+            # Method 3: Use pyautogui with individual key presses
+            if not shortcut_sent:
+                try:
+                    main_window.set_focus()
+                    time.sleep(0.2)
+                    pyautogui.keyDown('ctrl')
+                    pyautogui.keyDown('shift')
+                    pyautogui.press('s')
+                    pyautogui.keyUp('shift')
+                    pyautogui.keyUp('ctrl')
+                    shortcut_sent = True
+                    self.log("✓ Sent shortcut using pyautogui keyDown/Up()")
+                except Exception as e:
+                    self.log(f"  pyautogui keyDown/Up() failed: {str(e)[:50]}")
+            
+            if shortcut_sent:
+                self.log("✓ Keyboard shortcut sent successfully!")
+                time.sleep(0.5)  # Wait a moment for dialog to appear
+                self.log("Please complete the save dialog in MuseScore...")
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Save Selection Triggered",
+                    "Save Selection dialog should now be open in MuseScore.\n\n"
+                    "Please:\n"
+                    "1. Choose the save location (preferably the watch folder)\n"
+                    "2. Enter a filename\n"
+                    "3. Click Save\n\n"
+                    "If watching is enabled, the file will be processed automatically.\n\n"
+                    "If the dialog didn't open, check the output log for details."
+                ))
+            else:
+                self.log("✗ Failed to send keyboard shortcut with all methods")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Error",
+                    "Could not send keyboard shortcut to MuseScore.\n\n"
+                    "Please check the output log for details.\n\n"
+                    "You can still use the manual method:\n"
+                    "File → Save Selection (or Ctrl+Shift+S)"
+                ))
+        
+        except Exception as e:
+            error_msg = f"Error triggering Save Selection: {str(e)}"
+            self.log(f"✗ {error_msg}")
+            import traceback
+            self.log(f"Traceback:\n{traceback.format_exc()}")
+            self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
 
 
 def main():

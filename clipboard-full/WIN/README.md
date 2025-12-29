@@ -6,6 +6,7 @@ A desktop application for extracting pitches and metric positions from MuseScore
 
 - **Manual Mode**: Select and process any MuseScore file
 - **Auto Mode**: Automatically process files saved via MuseScore's "Save Selection" feature
+- **Automated Save Selection**: Trigger MuseScore's "Save Selection" dialog with a single click (no manual menu navigation needed!)
 - **Extracts**: Pitch names (e.g., C4, E5) and metric positions (Measure:Beat format)
 - **User-friendly GUI**: Simple interface with real-time output
 
@@ -17,12 +18,24 @@ A desktop application for extracting pitches and metric positions from MuseScore
 
 ## Installation
 
-No installation required! Just ensure you have Python 3.6+ installed.
+1. Ensure you have Python 3.6+ installed.
 
-Required Python libraries (usually included):
-- `tkinter` (GUI)
-- `xml.etree.ElementTree` (XML parsing)
-- `zipfile` (for .mscz files)
+2. **Core dependencies** (usually included with Python):
+   - `tkinter` (GUI)
+   - `xml.etree.ElementTree` (XML parsing)
+   - `zipfile` (for .mscz files)
+
+3. **Optional dependencies** (for automation features):
+   ```bash
+   pip install -r requirements.txt
+   ```
+   
+   Or install individually:
+   ```bash
+   pip install pywinauto pyautogui
+   ```
+   
+   Note: The automation feature (triggering Save Selection) requires these libraries. The app will work without them, but the automation button will be disabled.
 
 ## Usage
 
@@ -44,7 +57,9 @@ Required Python libraries (usually included):
    - Click "Start Watching"
    - In MuseScore:
      - **Select the measures** you want to extract (click and drag to select)
-     - Go to **File → Save Selection** (or press `Ctrl+Shift+S`)
+     - **Option A (Automated)**: Click the "Trigger Save Selection in MuseScore" button in the app
+     - **Option B (Manual)**: Go to **File → Save Selection** (or press `Ctrl+Shift+S`)
+     - Complete the save dialog in MuseScore (choose location and filename)
      - Save the selection to the watched folder
    - The app will automatically detect and process the new file
    - Results appear in real-time in the output area
@@ -93,4 +108,7 @@ G4	M1:2.00	(tick: 480)
 - **"Could not import extraction scripts"**: Make sure `extract_pitches_with_position.py` is in the same directory
 - **No notes extracted**: Check that the file is a valid MuseScore file (.mscx or .mscz)
 - **Watch folder not working**: Ensure MuseScore is saving to the watched folder location
+- **"Trigger Save Selection" button is disabled**: Install the required dependencies: `pip install pywinauto pyautogui`
+- **"MuseScore Not Found" error**: Make sure MuseScore 4 is running and has at least one score open before clicking the automation button
+- **Keyboard shortcut not working**: The automation feature requires MuseScore to be the active window. If it doesn't work, try manually activating MuseScore first, then click the button
 

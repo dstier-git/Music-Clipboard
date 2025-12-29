@@ -1,0 +1,9 @@
+# Required dependencies for MuseScore Pitch Extractor
+# Core dependencies (required)
+# Note: tkinter, xml.etree.ElementTree, and zipfile are part of Python standard library
+
+# Optional dependencies for automation features
+pywinauto>=0.6.8  # For finding and activating MuseScore window on Windows
+pyautogui>=0.9.54  # For sending keyboard shortcuts
+pywin32>=300  # Optional: For Windows API fallback methods (install with: pip install pywin32)
+
