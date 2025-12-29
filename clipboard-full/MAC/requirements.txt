@@ -1,0 +1,7 @@
+# Required dependencies for MuseScore Pitch Extractor (macOS)
+# Core dependencies (required)
+# Note: tkinter, xml.etree.ElementTree, and zipfile are part of Python standard library
+
+# Optional dependencies for automation features
+pyautogui>=0.9.54  # For sending keyboard shortcuts (optional, for automation feature)
+
