@@ -6,7 +6,7 @@ A desktop application for extracting pitches and metric positions from MuseScore
 
 - **Manual Mode**: Select and process any MuseScore file
 - **Auto Mode**: Automatically process files saved via MuseScore's "Save Selection" feature
-- **Automated Save Selection**: Trigger MuseScore's "Save Selection" dialog with a single click (no manual menu navigation needed!)
+- **Automated Save Selection**: Trigger MuseScore's "Save Selection" dialog with a single click or the background hotkey listener (Ctrl+Alt+S) - works even when the GUI is closed!
 - **Extracts**: Pitch names (e.g., C4, E5) and metric positions (Measure:Beat format)
 - **User-friendly GUI**: Simple interface with real-time output
 
@@ -32,10 +32,10 @@ A desktop application for extracting pitches and metric positions from MuseScore
    
    Or install individually:
    ```bash
-   pip install pywinauto pyautogui
+   pip install pywinauto pyautogui keyboard
    ```
    
-   Note: The automation feature (triggering Save Selection) requires these libraries. The app will work without them, but the automation button will be disabled.
+   Note: The automation feature (triggering Save Selection) requires `pywinauto` and `pyautogui`. The global hotkey feature requires `keyboard`. The app will work without them, but the automation features will be disabled.
 
 ## Usage
 
@@ -57,13 +57,25 @@ A desktop application for extracting pitches and metric positions from MuseScore
    - Click "Start Watching"
    - In MuseScore:
      - **Select the measures** you want to extract (click and drag to select)
-     - **Option A (Automated)**: Click the "Trigger Save Selection in MuseScore" button in the app
-     - **Option B (Manual)**: Go to **File → Save Selection** (or press `Ctrl+Shift+S`)
+     - **Option A (Global Hotkey - Recommended)**: Press `Ctrl+Alt+S` from anywhere (even when the GUI is closed and another app is focused)
+     - **Option B (Button)**: Click the "Trigger Save Selection in MuseScore" button in the app
+     - **Option C (Manual)**: Go to **File → Save Selection** (or press `Ctrl+Shift+S` in MuseScore)
      - Complete the save dialog in MuseScore (choose location and filename)
      - Save the selection to the watched folder
    - The app will automatically detect and process the new file
    - Results appear in real-time in the output area
+   - The last watch folder and watching state are remembered so the workflow resumes after restarting the app
    - **Note**: Saved selections already contain only the selected measures, so no need to specify a range
+
+### Background global hotkey listener
+
+1. Install the optional automation requirements (see `requirements.txt`) so `keyboard` and `psutil` are available.
+2. Run `python hotkey_listener.py` or double-click `run_hotkey_listener.bat`. Once running it will register `Ctrl+Alt+S` globally.
+3. The listener writes to `musescore_hotkey_request.txt` in your OS temporary directory so the GUI can detect the request the next time it runs.
+4. When `Ctrl+Alt+S` is pressed:
+   - If the GUI is already running, it receives the notification and triggers the Save Selection workflow.
+   - If the GUI is not running, the listener launches it with `--trigger-save-selection`, so the app opens and immediately starts the automation.
+5. Add a shortcut to `run_hotkey_listener.bat` inside `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` if you want the listener to start automatically on login.
 
 ### Command-Line Scripts
 
@@ -109,6 +121,8 @@ G4	M1:2.00	(tick: 480)
 - **No notes extracted**: Check that the file is a valid MuseScore file (.mscx or .mscz)
 - **Watch folder not working**: Ensure MuseScore is saving to the watched folder location
 - **"Trigger Save Selection" button is disabled**: Install the required dependencies: `pip install pywinauto pyautogui`
-- **"MuseScore Not Found" error**: Make sure MuseScore 4 is running and has at least one score open before clicking the automation button
-- **Keyboard shortcut not working**: The automation feature requires MuseScore to be the active window. If it doesn't work, try manually activating MuseScore first, then click the button
+- **Global hotkey not working**: Install the `keyboard` library: `pip install keyboard`. Note: On Windows, you may need to run the app as Administrator for global hotkeys to work properly.
+- **Global hotkey doesn't open the GUI when it's closed**: Make sure the background helper (`run_hotkey_listener.bat`) is running (or has been added to your Startup folder) so `Ctrl+Alt+S` can launch the app and trigger Save Selection.
+- **"MuseScore Not Found" error**: Make sure MuseScore 4 is running and has at least one score open before using the automation feature
+- **Keyboard shortcut not working**: The automation feature requires MuseScore to be running. The global hotkey (Ctrl+Alt+S) will automatically find and activate MuseScore, so you don't need to manually switch to it
 

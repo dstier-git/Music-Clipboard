@@ -1,4 +1,4 @@
 @echo off
-python musescore_extractor_gui.py
-pause
+pythonw musescore_extractor_gui.py
+exit
 

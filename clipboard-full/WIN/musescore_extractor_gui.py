@@ -1,3 +1,4 @@
+import argparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import os
@@ -7,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 import shutil
+import tempfile
 
 # Try to import automation libraries
 try:
@@ -31,11 +33,33 @@ try:
 except ImportError:
     WIN32_AVAILABLE = False
 
-# Output directory for extracted files
-OUTPUT_DIR = r"C:\Users\janet\Desktop\Music-Clipboard\clipboard-full\txts"
+# Try psutil for process searching
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
-# Import the extraction function
+# Try keyboard library for global hotkeys
+try:
+    import keyboard
+    KEYBOARD_AVAILABLE = True
+except ImportError:
+    KEYBOARD_AVAILABLE = False
+
+# Path to persist preferences
+CONFIG_FILE = Path(os.path.expanduser("~")) / ".musescore_pitch_extractor_prefs"
+
+# Location for hotkey trigger requests from the background listener
+HOTKEY_REQUEST_FILE = Path(tempfile.gettempdir()) / "musescore_hotkey_request.txt"
+
+# Output directories for extracted files
+OUTPUT_DIR = r"C:\Users\janet\Desktop\Music-Clipboard\clipboard-full\txts"
+MIDI_OUTPUT_DIR = r"C:\Users\janet\Desktop\Music-Clipboard\clipboard-full\midis"
+
+# Import the extraction functions
 EXTRACTION_FUNCTION = None
+MIDI_EXTRACTION_FUNCTION = None
 try:
     from extract_pitches_with_position import extract_pitches_with_position_from_mscx
     EXTRACTION_FUNCTION = extract_pitches_with_position_from_mscx
@@ -57,9 +81,16 @@ except ImportError:
         EXTRACTION_FUNCTION = None
         EXTRACTION_SCRIPT = None
 
+# Import MIDI extraction function
+try:
+    from extract_midi import extract_midi_from_mscx
+    MIDI_EXTRACTION_FUNCTION = extract_midi_from_mscx
+except ImportError:
+    MIDI_EXTRACTION_FUNCTION = None
+
 
 class MuseScoreExtractorApp:
-    def __init__(self, root):
+    def __init__(self, root, trigger_on_start=False, disable_global_hotkey=False):
         self.root = root
         self.root.title("MuseScore Pitch Extractor")
         self.root.geometry("800x700")
@@ -76,24 +107,78 @@ class MuseScoreExtractorApp:
             root.destroy()
             return
         
+        self.trigger_on_start = trigger_on_start
+        self.disable_global_hotkey = disable_global_hotkey
+
         # Variables
         self.watch_folder = tk.StringVar()
         self.watching = False
         self.watch_thread = None
         self.processed_files = set()
-        self.use_measure_range = tk.BooleanVar(value=False)
-        self.measure_start = tk.StringVar(value="1")
-        self.measure_end = tk.StringVar(value="1")
+        self.output_format = tk.StringVar(value="text")  # "text" or "midi"
+        self.last_extracted_file = None  # Store path of last extracted file
+        self.preferences = self.load_preferences()
+        self._hotkey_monitor_stop = threading.Event()
+        self._last_hotkey_request = 0
         
         # Create UI
         self.create_widgets()
+        self.apply_saved_preferences()
+        self.setup_hotkey_request_monitor()
         
-        # Set default watch folder (MuseScore default export location or user's Documents)
+        # Register global keyboard shortcut
+        self.register_global_hotkey()
+
+        if self.trigger_on_start:
+            self.root.after(500, self.trigger_save_selection)
+        
+        # Handle window close to cleanup resources and save state
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def load_preferences(self):
+        """Load saved watch folder and watching flag."""
+        if not CONFIG_FILE.exists():
+            return {}
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                lines = [line.rstrip('\n') for line in f.readlines()]
+            folder = lines[0] if lines else ""
+            watching = False
+            if len(lines) > 1:
+                watching = lines[1].strip().lower() == "true"
+            return {"watch_folder": folder, "watching": watching}
+        except Exception:
+            return {}
+
+    def save_preferences(self, watching_override=None):
+        """Write the current folder and watching state to disk."""
+        folder = self.watch_folder.get()
+        watching = self.watching if watching_override is None else watching_override
+        self.preferences = {"watch_folder": folder, "watching": watching}
+        try:
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                f.write(f"{folder}\n")
+                f.write("true\n" if watching else "false\n")
+        except Exception as exc:
+            self.log(f"⚠ Could not save preferences: {exc}")
+
+    def apply_saved_preferences(self):
+        """Restore the saved watch folder and optional watching state."""
         default_folder = os.path.join(os.path.expanduser("~"), "Documents", "MuseScore4", "Scores")
-        if os.path.exists(default_folder):
+        saved_folder = self.preferences.get("watch_folder")
+
+        if saved_folder and os.path.exists(saved_folder):
+            self.watch_folder.set(saved_folder)
+        elif os.path.exists(default_folder):
             self.watch_folder.set(default_folder)
         else:
             self.watch_folder.set(os.path.join(os.path.expanduser("~"), "Documents"))
+
+        if self.preferences.get("watching"):
+            folder = self.watch_folder.get().strip()
+            if folder and os.path.exists(folder):
+                self.root.after(200, self.toggle_watch)
     
     def create_widgets(self):
         # Main container
@@ -122,27 +207,13 @@ class MuseScoreExtractorApp:
         ttk.Button(file_frame, text="Browse...", command=self.browse_file).grid(row=0, column=2, padx=5)
         ttk.Button(file_frame, text="Extract", command=self.extract_file).grid(row=0, column=3, padx=5)
         
-        # Measure range selection
-        measure_frame = ttk.Frame(file_frame)
-        measure_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
-        
-        ttk.Checkbutton(measure_frame, text="Extract only specific measures:", 
-                       variable=self.use_measure_range,
-                       command=self.toggle_measure_range).grid(row=0, column=0, sticky=tk.W, padx=5)
-        
-        ttk.Label(measure_frame, text="From measure:").grid(row=0, column=1, padx=(20, 5))
-        measure_start_entry = ttk.Entry(measure_frame, textvariable=self.measure_start, width=5)
-        measure_start_entry.grid(row=0, column=2, padx=5)
-        
-        ttk.Label(measure_frame, text="To measure:").grid(row=0, column=3, padx=(10, 5))
-        measure_end_entry = ttk.Entry(measure_frame, textvariable=self.measure_end, width=5)
-        measure_end_entry.grid(row=0, column=4, padx=5)
-        
-        # Store widgets for enabling/disabling
-        self.measure_range_widgets = [measure_start_entry, measure_end_entry]
-        for widget in self.measure_range_widgets:
-            widget.config(state='disabled')
-        
+        # Output format selection
+        format_frame = ttk.Frame(file_frame)
+        format_frame.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ttk.Label(format_frame, text="Output Format:").grid(row=0, column=0, padx=5)
+        ttk.Radiobutton(format_frame, text="Text", variable=self.output_format, value="text").grid(row=0, column=1, padx=5)
+        ttk.Radiobutton(format_frame, text="MIDI", variable=self.output_format, value="midi").grid(row=0, column=2, padx=5)
+
         # Watch Folder Section
         watch_frame = ttk.LabelFrame(main_frame, text="Auto-Process Saved Selections", padding="10")
         watch_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -164,6 +235,24 @@ class MuseScoreExtractorApp:
         )
         self.save_selection_button.grid(row=0, column=0, padx=5)
         
+        # Global hotkey indicator
+        if KEYBOARD_AVAILABLE:
+            hotkey_label = ttk.Label(
+                automation_frame,
+                text="Global Hotkey: Ctrl+Alt+S (background listener keeps it active even when the GUI is closed)",
+                foreground="green",
+                font=("Arial", 9, "bold")
+            )
+            hotkey_label.grid(row=0, column=1, padx=10)
+        else:
+            hotkey_label = ttk.Label(
+                automation_frame,
+                text="(Install 'keyboard' for global hotkey: pip install keyboard)",
+                foreground="gray",
+                font=("Arial", 8)
+            )
+            hotkey_label.grid(row=0, column=1, padx=5)
+        
         if not PYAUTOGUI_AVAILABLE or not PYWINAUTO_AVAILABLE:
             self.save_selection_button.config(state='disabled')
             missing_libs = []
@@ -176,7 +265,7 @@ class MuseScoreExtractorApp:
                 text=f"(Install: pip install {' '.join(missing_libs)})", 
                 foreground="gray", 
                 font=("Arial", 8)
-            ).grid(row=0, column=1, padx=5)
+            ).grid(row=1, column=0, columnspan=2, padx=5, sticky=tk.W)
         
         self.watch_button = ttk.Button(watch_frame, text="Start Watching", command=self.toggle_watch)
         self.watch_button.grid(row=2, column=0, columnspan=3, pady=10)
@@ -187,18 +276,21 @@ class MuseScoreExtractorApp:
         # Instructions
         instructions = """
 Instructions:
-1. Manual Mode: 
+1. Manual Mode:
    - Select a .mscx or .mscz file
-   - Optionally specify measure range (e.g., measures 5-10)
    - Click 'Extract' to process
-2. Auto Mode (Save Selection): 
+2. Auto Mode (Save Selection):
    - Set the watch folder (where MuseScore saves selections)
-   - In MuseScore: Select the measures you want to extract
-   - Click 'Trigger Save Selection in MuseScore' button (or manually: File → Save Selection)
-   - Complete the save dialog in MuseScore
-   - The app will automatically process the new file if watching is enabled
    - Click 'Start Watching' to begin monitoring
+   - In MuseScore: Select the measures you want to extract
+   - Click 'Trigger Save Selection in MuseScore' button (or manually: File > Save Selection)
+   - In the save dialog that opens:
+     • Choose the save location (preferably the watch folder)
+     • Enter a filename
+     • Click Save
+   - The app will automatically process the new file if watching is enabled
    - Note: Saved selections already contain only selected measures
+   - If the dialog didn't open, check the output log for details
         """
         ttk.Label(watch_frame, text=instructions.strip(), justify=tk.LEFT, foreground="gray").grid(
             row=4, column=0, columnspan=3, pady=10, sticky=tk.W
@@ -214,15 +306,22 @@ Instructions:
         self.output_text = scrolledtext.ScrolledText(output_frame, height=15, width=80, wrap=tk.WORD)
         self.output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
+        # Button frame for output actions
+        button_frame = ttk.Frame(output_frame)
+        button_frame.grid(row=1, column=0, pady=5)
+        
         # Clear button
-        ttk.Button(output_frame, text="Clear Output", command=self.clear_output).grid(row=1, column=0, pady=5)
-    
-    def toggle_measure_range(self):
-        """Enable/disable measure range entry fields"""
-        state = 'normal' if self.use_measure_range.get() else 'disabled'
-        for widget in self.measure_range_widgets:
-            widget.config(state=state)
-    
+        ttk.Button(button_frame, text="Clear Output", command=self.clear_output).grid(row=0, column=0, padx=5)
+        
+        # Open file location button
+        self.open_location_button = ttk.Button(
+            button_frame, 
+            text="Open File Location", 
+            command=self.open_file_location,
+            state='disabled'
+        )
+        self.open_location_button.grid(row=0, column=1, padx=5)
+
     def browse_file(self):
         filename = filedialog.askopenfilename(
             title="Select MuseScore File",
@@ -235,6 +334,7 @@ Instructions:
         folder = filedialog.askdirectory(title="Select Folder to Watch")
         if folder:
             self.watch_folder.set(folder)
+            self.save_preferences()
     
     def log(self, message):
         """Add message to output text area"""
@@ -244,6 +344,44 @@ Instructions:
     
     def clear_output(self):
         self.output_text.delete(1.0, tk.END)
+    
+    def open_file_location(self):
+        """Open the file location of the last extracted file in Windows Explorer"""
+        if self.last_extracted_file and os.path.exists(self.last_extracted_file):
+            try:
+                # Open Windows Explorer and select the file
+                subprocess.run(['explorer', '/select,', os.path.normpath(self.last_extracted_file)])
+            except Exception as e:
+                # Fallback: just open the folder
+                try:
+                    folder = os.path.dirname(self.last_extracted_file)
+                    os.startfile(folder)
+                except Exception as e2:
+                    self.log(f"Error opening file location: {str(e2)}\n")
+                    messagebox.showerror("Error", f"Could not open file location:\n{str(e2)}")
+        else:
+            messagebox.showwarning("Warning", "No extracted file location available.")
+
+    def _delete_previous_extracted_file(self, new_path):
+        """Remove the previously extracted file so only the latest remains."""
+        previous_path = self.last_extracted_file
+        if not previous_path or previous_path == new_path:
+            return
+        try:
+            if os.path.exists(previous_path):
+                os.remove(previous_path)
+                self.log(f"Deleted previous extraction: {previous_path}")
+        except Exception as exc:
+            self.log(f"Failed to delete previous extraction ({previous_path}): {exc}")
+
+    def _handle_successful_extraction(self, extracted_path):
+        """Record the new extraction and update the UI."""
+        if not extracted_path:
+            return
+        self._delete_previous_extracted_file(extracted_path)
+        self.last_extracted_file = extracted_path
+        self.root.after(0, lambda: self.open_location_button.config(state='normal'))
+        self.root.after(0, self.open_file_location)
     
     def extract_file(self, file_path=None):
         """Extract pitches from a MuseScore file"""
@@ -258,95 +396,100 @@ Instructions:
             messagebox.showerror("Error", f"File not found: {file_path}")
             return
         
-        # Get measure range if specified
-        measure_range = None
-        if self.use_measure_range.get():
-            try:
-                start = int(self.measure_start.get())
-                end = int(self.measure_end.get())
-                if start < 1 or end < 1:
-                    messagebox.showerror("Error", "Measure numbers must be 1 or greater.")
-                    return
-                if start > end:
-                    messagebox.showerror("Error", "Start measure must be less than or equal to end measure.")
-                    return
-                measure_range = (start, end)
-            except ValueError:
-                messagebox.showerror("Error", "Please enter valid measure numbers.")
-                return
-        
         # Run extraction in a separate thread to avoid freezing UI
-        thread = threading.Thread(target=self._extract_thread, args=(file_path, measure_range), daemon=True)
+        thread = threading.Thread(target=self._extract_thread, args=(file_path,), daemon=True)
         thread.start()
     
-    def _extract_thread(self, file_path, measure_range=None):
+    def _extract_thread(self, file_path):
         """Extraction logic running in background thread"""
+        output_format = self.output_format.get()
+        
         self.log(f"\n{'='*60}")
         self.log(f"Processing: {os.path.basename(file_path)}")
-        if measure_range:
-            self.log(f"Measure range: {measure_range[0]}-{measure_range[1]}")
+        self.log(f"Output format: {output_format.upper()}")
         self.log(f"{'='*60}\n")
         
         try:
-            # Create output directory if it doesn't exist
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-            
-            # Determine output file path
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            if EXTRACTION_SCRIPT == "extract_pitches_with_position":
-                suffix = "_pitches_with_position"
-                if measure_range:
-                    suffix += f"_m{measure_range[0]}-{measure_range[1]}"
-                output_file = os.path.join(OUTPUT_DIR, base_name + suffix + ".txt")
-            else:
-                suffix = "_pitches"
-                if measure_range:
-                    suffix += f"_m{measure_range[0]}-{measure_range[1]}"
-                output_file = os.path.join(OUTPUT_DIR, base_name + suffix + ".txt")
-            
-            # Extract pitches with positions
-            # Check if the function accepts measure_range parameter
-            import inspect
-            sig = inspect.signature(EXTRACTION_FUNCTION)
-            if 'measure_range' in sig.parameters:
-                result = EXTRACTION_FUNCTION(file_path, output_file, debug=False, measure_range=measure_range)
-            else:
-                result = EXTRACTION_FUNCTION(file_path, output_file, debug=False)
-            
-            # Handle return value - could be (notes, path) tuple or just notes
-            if isinstance(result, tuple) and len(result) == 2:
-                notes, actual_output_path = result
-                output_file = actual_output_path  # Use the actual path from extraction function
-            else:
-                notes = result
-            
-            if notes:
-                self.log(f"✓ Successfully extracted {len(notes)} notes!")
-                self.log(f"✓ Output saved to: {output_file}\n")
+            if output_format == "midi":
+                # MIDI extraction
+                if MIDI_EXTRACTION_FUNCTION is None:
+                    error_msg = "MIDI extraction function not available. Please ensure extract_midi.py is in the same directory."
+                    self.log(f"{error_msg}\n")
+                    self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
+                    return
                 
-                # Show first 10 notes
-                self.log("First 10 notes:")
-                for i, (pitch, position, tick) in enumerate(notes[:10], 1):
-                    if tick is not None:
-                        self.log(f"  {i}. {pitch} | {position} | (tick: {tick})")
+                # Create output directory if it doesn't exist
+                os.makedirs(MIDI_OUTPUT_DIR, exist_ok=True)
+                
+                # Determine output file path
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                output_file = os.path.join(MIDI_OUTPUT_DIR, base_name + ".mid")
+                
+                # Extract MIDI
+                try:
+                    midi_path = MIDI_EXTRACTION_FUNCTION(file_path, output_file)
+                    
+                    if midi_path and os.path.exists(midi_path):
+                        self.log("Successfully extracted MIDI!")
+                        self.log(f"MIDI file saved to: {midi_path}\n")
+                        # Store the extracted file path and enable open location button
+                        self._handle_successful_extraction(midi_path)
                     else:
-                        self.log(f"  {i}. {pitch} | {position}")
-                
-                if len(notes) > 10:
-                    self.log(f"  ... and {len(notes) - 10} more\n")
-                
-                # Show success message
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "Success", 
-                    f"Extracted {len(notes)} notes!\n\nSaved to:\n{output_file}"
-                ))
+                        error_msg = "Failed to extract MIDI file."
+                        self.log(f"{error_msg}\n")
+                        self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
+                except Exception as e:
+                    error_msg = f"Error extracting MIDI: {str(e)}"
+                    self.log(f"{error_msg}\n")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
             else:
-                self.log("✗ No notes extracted. Please check the file format.\n")
-                self.root.after(0, lambda: messagebox.showerror("Error", "No notes were extracted from the file."))
-        
+                # Text extraction (existing logic)
+                # Create output directory if it doesn't exist
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                
+                # Determine output file path
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                if EXTRACTION_SCRIPT == "extract_pitches_with_position":
+                    output_file = os.path.join(OUTPUT_DIR, base_name + "_pitches_with_position.txt")
+                else:
+                    output_file = os.path.join(OUTPUT_DIR, base_name + "_pitches.txt")
+                
+                # Extract pitches with positions
+                result = EXTRACTION_FUNCTION(file_path, output_file, debug=False)
+                
+                # Handle return value - could be (notes, path) tuple or just notes
+                if isinstance(result, tuple) and len(result) == 2:
+                    notes, actual_output_path = result
+                    output_file = actual_output_path  # Use the actual path from extraction function
+                else:
+                    notes = result
+                
+                if notes:
+                    self.log(f"Successfully extracted {len(notes)} notes!")
+                    self.log(f"Output saved to: {output_file}\n")
+                    # Store the extracted file path and enable open location button
+                    self._handle_successful_extraction(output_file)
+                    
+                    # Show first 10 notes
+                    self.log("First 10 notes:")
+                    for i, (pitch, position, tick) in enumerate(notes[:10], 1):
+                        if tick is not None:
+                            self.log(f"  {i}. {pitch} | {position} | (tick: {tick})")
+                        else:
+                            self.log(f"  {i}. {pitch} | {position}")
+                    
+                    if len(notes) > 10:
+                        self.log(f"  ... and {len(notes) - 10} more\n")
+                else:
+                    self.log("No notes extracted. Please check the file format.\n")
+                    self.root.after(0, lambda: messagebox.showerror("Error", "No notes were extracted from the file."))
         except Exception as e:
             error_msg = f"Error processing file: {str(e)}"
-            self.log(f"✗ {error_msg}\n")
+            self.log(f"{error_msg}\n")
+            import traceback
+            self.log(traceback.format_exc())
             self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
     
     def toggle_watch(self):
@@ -361,6 +504,7 @@ Instructions:
             self.watch_button.config(text="Stop Watching")
             self.watch_status_label.config(text=f"Status: Watching '{os.path.basename(folder)}'", foreground="green")
             self.log(f"Started watching folder: {folder}\n")
+            self.save_preferences()
             
             # Start watching in background thread
             self.watch_thread = threading.Thread(target=self._watch_folder, args=(folder,), daemon=True)
@@ -370,7 +514,8 @@ Instructions:
             self.watch_button.config(text="Start Watching")
             self.watch_status_label.config(text="Status: Not watching", foreground="gray")
             self.log("Stopped watching folder.\n")
-    
+            self.save_preferences()
+
     def _watch_folder(self, folder):
         """Monitor folder for new MuseScore files"""
         # Get initial list of files
@@ -442,71 +587,129 @@ Instructions:
             self.log("Step 1: Finding MuseScore window...")
             
             # Find MuseScore window using pywinauto - try multiple methods
+            # IMPORTANT: We need to find the actual MuseScore application, not our own app window
             found = False
             methods_tried = []
             
-            # Method 1: Try by title with UIA backend
+            # Method 1: Try by process name first (most reliable - looks for MuseScore4.exe)
             try:
-                app = Application(backend="uia").connect(title_re=".*MuseScore.*", found_index=0)
-                methods_tried.append("UIA backend by title")
+                app = Application(backend="uia").connect(path="MuseScore4.exe")
+                methods_tried.append("UIA backend by process")
                 found = True
-                self.log("✓ Found MuseScore window (UIA backend by title)")
+                self.log("✓ Found MuseScore process (UIA backend by process name)")
             except Exception as e:
-                methods_tried.append(f"UIA by title failed: {str(e)[:50]}")
+                methods_tried.append(f"UIA by process failed: {str(e)[:50]}")
             
-            # Method 2: Try by process name
+            # Method 2: Try by process name with win32 backend
             if not found:
                 try:
-                    app = Application(backend="uia").connect(path="MuseScore4.exe")
-                    methods_tried.append("UIA backend by process")
+                    app = Application(backend="win32").connect(path="MuseScore4.exe")
+                    methods_tried.append("Win32 backend by process")
                     found = True
-                    self.log("✓ Found MuseScore process (UIA backend)")
+                    self.log("✓ Found MuseScore process (Win32 backend by process name)")
                 except Exception as e:
-                    methods_tried.append(f"UIA by process failed: {str(e)[:50]}")
+                    methods_tried.append(f"Win32 by process failed: {str(e)[:50]}")
             
-            # Method 3: Try win32 backend
+            # Method 3: Try by process name without backend
             if not found:
                 try:
-                    app = Application(backend="win32").connect(title_re=".*MuseScore.*")
-                    methods_tried.append("Win32 backend")
+                    app = Application().connect(path="MuseScore4.exe")
+                    methods_tried.append("Default backend by process")
                     found = True
-                    self.log("✓ Found MuseScore window (Win32 backend)")
+                    self.log("✓ Found MuseScore process (default backend by process name)")
                 except Exception as e:
-                    methods_tried.append(f"Win32 failed: {str(e)[:50]}")
+                    methods_tried.append(f"Default by process failed: {str(e)[:50]}")
             
-            # Method 4: Try without backend specification
+            # Method 4: Try by title but exclude our own app window
             if not found:
                 try:
-                    app = Application().connect(title_re=".*MuseScore.*")
-                    methods_tried.append("Default backend")
-                    found = True
-                    self.log("✓ Found MuseScore window (default backend)")
+                    # Try to get all windows with MuseScore in title and filter
+                    # Use a more specific pattern that excludes "Pitch Extractor"
+                    try:
+                        # Try connecting to MuseScore 4 specifically
+                        app = Application(backend="uia").connect(title_re=".*MuseScore 4.*")
+                        found = True
+                        self.log("✓ Found MuseScore window (UIA backend by 'MuseScore 4' title)")
+                    except:
+                        # If that fails, try to enumerate and filter
+                        try:
+                            # Get all processes and find MuseScore4.exe
+                            if PSUTIL_AVAILABLE:
+                                for proc in psutil.process_iter(['pid', 'name']):
+                                    try:
+                                        proc_name = proc.info['name'] or ''
+                                        if 'MuseScore4.exe' in proc_name or ('MuseScore' in proc_name and 'Pitch' not in proc_name):
+                                            app = Application(backend="uia").connect(process=proc.info['pid'])
+                                            found = True
+                                            self.log(f"✓ Found MuseScore by process enumeration: {proc_name}")
+                                            break
+                                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                        continue
+                        except Exception as e:
+                            methods_tried.append(f"Process enumeration failed: {str(e)[:50]}")
                 except Exception as e:
-                    methods_tried.append(f"Default failed: {str(e)[:50]}")
+                    methods_tried.append(f"UIA by filtered title failed: {str(e)[:50]}")
             
-            # Method 5: Try using Windows API to find window handle
+            # Method 5: Try using Windows API to find window handle (exclude our app)
             if not found and WIN32_AVAILABLE:
                 try:
                     def enum_handler(hwnd, ctx):
                         if win32gui.IsWindowVisible(hwnd):
                             window_text = win32gui.GetWindowText(hwnd)
-                            if 'MuseScore' in window_text:
-                                ctx.append((hwnd, window_text))
+                            # Exclude our own app and look for actual MuseScore
+                            if 'MuseScore' in window_text and 'Pitch Extractor' not in window_text:
+                                # Also check the process name if psutil is available
+                                try:
+                                    _, pid = win32gui.GetWindowThreadProcessId(hwnd)
+                                    if PSUTIL_AVAILABLE:
+                                        try:
+                                            proc = psutil.Process(pid)
+                                            proc_name = proc.name()
+                                            if 'MuseScore' in proc_name and 'Pitch Extractor' not in proc_name:
+                                                ctx.append((hwnd, window_text, proc_name))
+                                        except:
+                                            # If we can't check process, still add it if title looks right
+                                            if 'MuseScore 4' in window_text or window_text.startswith('MuseScore'):
+                                                ctx.append((hwnd, window_text, 'unknown'))
+                                    else:
+                                        # No psutil, but title looks right
+                                        if 'MuseScore 4' in window_text or window_text.startswith('MuseScore'):
+                                            ctx.append((hwnd, window_text, 'unknown'))
+                                except:
+                                    pass
                     
                     windows = []
                     win32gui.EnumWindows(enum_handler, windows)
                     
                     if windows:
-                        hwnd, window_text = windows[0]
+                        hwnd, window_text, proc_name = windows[0]
                         # Try to connect using handle
                         try:
                             app = Application().connect(handle=hwnd)
                             found = True
-                            self.log(f"✓ Found MuseScore window using Windows API: '{window_text}'")
+                            self.log(f"✓ Found MuseScore window using Windows API: '{window_text}' (process: {proc_name})")
                         except:
                             pass
                 except Exception as e:
                     methods_tried.append(f"Windows API failed: {str(e)[:50]}")
+            
+            # Method 6: Last resort - try to find by checking all processes (if psutil available)
+            if not found and PSUTIL_AVAILABLE:
+                try:
+                    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                        try:
+                            proc_name = proc.info['name'] or ''
+                            proc_exe = proc.info['exe'] or ''
+                            # Look for MuseScore4.exe specifically
+                            if 'MuseScore4.exe' in proc_exe or (proc_name and 'MuseScore' in proc_name and '4' in proc_name and 'Pitch' not in proc_name):
+                                app = Application(backend="uia").connect(process=proc.info['pid'])
+                                found = True
+                                self.log(f"✓ Found MuseScore by process search: {proc_name}")
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
+                except Exception as e:
+                    methods_tried.append(f"Process search failed: {str(e)[:50]}")
             
             if not found:
                 self.log("✗ Could not find MuseScore window")
@@ -646,16 +849,6 @@ Instructions:
                 self.log("✓ Keyboard shortcut sent successfully!")
                 time.sleep(0.5)  # Wait a moment for dialog to appear
                 self.log("Please complete the save dialog in MuseScore...")
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "Save Selection Triggered",
-                    "Save Selection dialog should now be open in MuseScore.\n\n"
-                    "Please:\n"
-                    "1. Choose the save location (preferably the watch folder)\n"
-                    "2. Enter a filename\n"
-                    "3. Click Save\n\n"
-                    "If watching is enabled, the file will be processed automatically.\n\n"
-                    "If the dialog didn't open, check the output log for details."
-                ))
             else:
                 self.log("✗ Failed to send keyboard shortcut with all methods")
                 self.root.after(0, lambda: messagebox.showerror(
@@ -673,13 +866,95 @@ Instructions:
             self.log(f"Traceback:\n{traceback.format_exc()}")
             self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
 
+    def setup_hotkey_request_monitor(self):
+        """Monitor a temp file for hotkey requests from the background listener."""
+        self.hotkey_request_path = HOTKEY_REQUEST_FILE
+        try:
+            if not self.hotkey_request_path.exists():
+                self.hotkey_request_path.write_text("0")
+            self._last_hotkey_request = self.hotkey_request_path.stat().st_mtime
+        except Exception:
+            self._last_hotkey_request = 0
+
+        monitor_thread = threading.Thread(target=self._monitor_hotkey_request, daemon=True)
+        monitor_thread.start()
+
+    def _monitor_hotkey_request(self):
+        while not self._hotkey_monitor_stop.is_set():
+            try:
+                if self.hotkey_request_path.exists():
+                    mtime = self.hotkey_request_path.stat().st_mtime
+                    if mtime > self._last_hotkey_request:
+                        self._last_hotkey_request = mtime
+                        self.log("Global hotkey request detected (background listener).")
+                        self.root.after(0, self.trigger_save_selection)
+                time.sleep(0.6)
+            except Exception:
+                time.sleep(1)
+    
+    def register_global_hotkey(self):
+        """Register a global keyboard shortcut to trigger Save Selection"""
+        if self.disable_global_hotkey:
+            self.log("Global hotkey registration skipped (external listener handles Ctrl+Alt+S).")
+            return
+        if not KEYBOARD_AVAILABLE:
+            self.log("Global hotkey not available: Install 'keyboard' library (pip install keyboard)")
+            return
+        
+        # Default hotkey: Ctrl+Alt+S (won't conflict with MuseScore's Ctrl+Shift+S)
+        hotkey = "ctrl+alt+s"
+        
+        try:
+            # Register the hotkey
+            keyboard.add_hotkey(hotkey, self.trigger_save_selection, suppress=False)
+            self.log(f"✓ Global hotkey registered: {hotkey.upper()}")
+            self.log("  You can now press Ctrl+Alt+S from anywhere to trigger Save Selection!")
+        except Exception as e:
+            self.log(f"✗ Failed to register global hotkey: {str(e)}")
+            messagebox.showwarning(
+                "Hotkey Registration Failed",
+                f"Could not register global hotkey:\n{str(e)}\n\n"
+                "You can still use the button in the app."
+            )
+    
+    def on_closing(self):
+        """Cleanup when window is closed"""
+        # Unregister hotkey if it was registered
+        if KEYBOARD_AVAILABLE:
+            try:
+                keyboard.unhook_all_hotkeys()
+            except:
+                pass
+        self._hotkey_monitor_stop.set()
+        watching_state = self.watching
+        self.save_preferences(watching_override=watching_state)
+        self.watching = False
+        self.root.destroy()
+
 
 def main():
+    parser = argparse.ArgumentParser(description="MuseScore Pitch Extractor GUI")
+    parser.add_argument(
+        "--trigger-save-selection",
+        action="store_true",
+        help="Trigger the Save Selection automation as soon as the UI loads."
+    )
+    parser.add_argument(
+        "--disable-global-hotkey",
+        action="store_true",
+        help="Skip registering the in-app Ctrl+Alt+S hotkey (used by the background listener)."
+    )
+
+    args = parser.parse_args()
+
     root = tk.Tk()
-    app = MuseScoreExtractorApp(root)
+    app = MuseScoreExtractorApp(
+        root,
+        trigger_on_start=args.trigger_save_selection,
+        disable_global_hotkey=args.disable_global_hotkey
+    )
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
-
