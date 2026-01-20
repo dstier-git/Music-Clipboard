@@ -17,7 +17,7 @@ except ImportError:
 
 APP_SCRIPT = Path(__file__).resolve().parent / "musescore_extractor_gui.py"
 REQUEST_FILE = Path(tempfile.gettempdir()) / "musescore_hotkey_request.txt"
-HOTKEY = "ctrl+alt+s"
+HOTKEY = "ctrl+cmd+s"
 
 
 def _get_interpreter():
@@ -91,7 +91,7 @@ def main():
         pass
 
     keyboard.add_hotkey(HOTKEY, _on_hotkey)
-    print(f"Listening for Ctrl+Alt+S → launches {APP_SCRIPT.name}")
+    print(f"Listening for Ctrl+Cmd+S → launches {APP_SCRIPT.name}")
 
     keyboard.wait()
 

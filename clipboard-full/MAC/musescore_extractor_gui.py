@@ -397,9 +397,6 @@ class MuseScoreExtractorApp:
         self.preferences = self.load_preferences()
         self._hotkey_monitor_stop = threading.Event()
         self._last_hotkey_request = 0
-        self.use_measure_range = tk.BooleanVar(value=False)
-        self.measure_start = tk.StringVar(value="1")
-        self.measure_end = tk.StringVar(value="1")
         
         # Create UI
         self.create_widgets()
@@ -494,27 +491,6 @@ class MuseScoreExtractorApp:
         ttk.Radiobutton(format_frame, text="Text", variable=self.output_format, value="text").grid(row=0, column=1, padx=5)
         ttk.Radiobutton(format_frame, text="MIDI", variable=self.output_format, value="midi").grid(row=0, column=2, padx=5)
         
-        # Measure range selection
-        measure_frame = ttk.Frame(file_frame)
-        measure_frame.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
-        
-        ttk.Checkbutton(measure_frame, text="Extract only specific measures:", 
-                       variable=self.use_measure_range,
-                       command=self.toggle_measure_range).grid(row=0, column=0, sticky=tk.W, padx=5)
-        
-        ttk.Label(measure_frame, text="From measure:").grid(row=0, column=1, padx=(20, 5))
-        measure_start_entry = ttk.Entry(measure_frame, textvariable=self.measure_start, width=5)
-        measure_start_entry.grid(row=0, column=2, padx=5)
-        
-        ttk.Label(measure_frame, text="To measure:").grid(row=0, column=3, padx=(10, 5))
-        measure_end_entry = ttk.Entry(measure_frame, textvariable=self.measure_end, width=5)
-        measure_end_entry.grid(row=0, column=4, padx=5)
-        
-        # Store widgets for enabling/disabling
-        self.measure_range_widgets = [measure_start_entry, measure_end_entry]
-        for widget in self.measure_range_widgets:
-            widget.config(state='disabled')
-        
         # Watch Folder Section
         watch_frame = ttk.LabelFrame(main_frame, text="Auto-Process Saved Selections", padding="10")
         watch_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -540,7 +516,7 @@ class MuseScoreExtractorApp:
         if KEYBOARD_AVAILABLE:
             hotkey_label = ttk.Label(
                 automation_frame,
-                text="Global Hotkey: Ctrl+Alt+S (background listener keeps it active even when the GUI is closed)",
+                text="Global Hotkey: Ctrl+Cmd+S (background listener keeps it active even when the GUI is closed)",
                 foreground="green",
                 font=("Arial", 9, "bold")
             )
@@ -624,12 +600,6 @@ Instructions:
         )
         self.open_location_button.grid(row=0, column=1, padx=5)
     
-    def toggle_measure_range(self):
-        """Enable/disable measure range entry fields"""
-        state = 'normal' if self.use_measure_range.get() else 'disabled'
-        for widget in self.measure_range_widgets:
-            widget.config(state=state)
-    
     def browse_file(self):
         filename = filedialog.askopenfilename(
             title="Select MuseScore File",
@@ -704,36 +674,17 @@ Instructions:
             messagebox.showerror("Error", f"File not found: {file_path}")
             return
         
-        # Get measure range if specified
-        measure_range = None
-        if self.use_measure_range.get():
-            try:
-                start = int(self.measure_start.get())
-                end = int(self.measure_end.get())
-                if start < 1 or end < 1:
-                    messagebox.showerror("Error", "Measure numbers must be 1 or greater.")
-                    return
-                if start > end:
-                    messagebox.showerror("Error", "Start measure must be less than or equal to end measure.")
-                    return
-                measure_range = (start, end)
-            except ValueError:
-                messagebox.showerror("Error", "Please enter valid measure numbers.")
-                return
-        
         # Run extraction in a separate thread to avoid freezing UI
-        thread = threading.Thread(target=self._extract_thread, args=(file_path, measure_range), daemon=True)
+        thread = threading.Thread(target=self._extract_thread, args=(file_path,), daemon=True)
         thread.start()
     
-    def _extract_thread(self, file_path, measure_range=None):
+    def _extract_thread(self, file_path):
         """Extraction logic running in background thread"""
         output_format = self.output_format.get()
         
         self.log(f"\n{'='*60}")
         self.log(f"Processing: {os.path.basename(file_path)}")
         self.log(f"Output format: {output_format.upper()}")
-        if measure_range:
-            self.log(f"Measure range: {measure_range[0]}-{measure_range[1]}")
         self.log(f"{'='*60}\n")
         
         try:
@@ -754,7 +705,7 @@ Instructions:
                 
                 # Extract MIDI
                 try:
-                    midi_path = MIDI_EXTRACTION_FUNCTION(file_path, output_file, measure_range=measure_range)
+                    midi_path = MIDI_EXTRACTION_FUNCTION(file_path, output_file)
                     
                     if midi_path and os.path.exists(midi_path):
                         self.log("Successfully extracted MIDI!")
@@ -779,24 +730,12 @@ Instructions:
                 # Determine output file path
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 if EXTRACTION_SCRIPT == "extract_pitches_with_position":
-                    suffix = "_pitches_with_position"
-                    if measure_range:
-                        suffix += f"_m{measure_range[0]}-{measure_range[1]}"
-                    output_file = os.path.join(OUTPUT_DIR, base_name + suffix + ".txt")
+                    output_file = os.path.join(OUTPUT_DIR, base_name + "_pitches_with_position.txt")
                 else:
-                    suffix = "_pitches"
-                    if measure_range:
-                        suffix += f"_m{measure_range[0]}-{measure_range[1]}"
-                    output_file = os.path.join(OUTPUT_DIR, base_name + suffix + ".txt")
+                    output_file = os.path.join(OUTPUT_DIR, base_name + "_pitches.txt")
                 
                 # Extract pitches with positions
-                # Check if the function accepts measure_range parameter
-                import inspect
-                sig = inspect.signature(EXTRACTION_FUNCTION)
-                if 'measure_range' in sig.parameters:
-                    result = EXTRACTION_FUNCTION(file_path, output_file, debug=False, measure_range=measure_range)
-                else:
-                    result = EXTRACTION_FUNCTION(file_path, output_file, debug=False)
+                result = EXTRACTION_FUNCTION(file_path, output_file, debug=False)
                 
                 # Handle return value - could be (notes, path) tuple or just notes
                 if isinstance(result, tuple) and len(result) == 2:
@@ -1056,20 +995,20 @@ Instructions:
     def register_global_hotkey(self):
         """Register a global keyboard shortcut to trigger Save Selection"""
         if self.disable_global_hotkey:
-            self.log("Global hotkey registration skipped (external listener handles Ctrl+Alt+S).")
+            self.log("Global hotkey registration skipped (external listener handles Ctrl+Cmd+S).")
             return
         if not KEYBOARD_AVAILABLE:
             self.log("Global hotkey not available: Install 'keyboard' library (pip install keyboard)")
             return
         
-        # Default hotkey: Ctrl+Alt+S (won't conflict with MuseScore's Cmd+Shift+S)
-        hotkey = "ctrl+alt+s"
+        # Default hotkey: Ctrl+Cmd+S (won't conflict with MuseScore's Cmd+Shift+S)
+        hotkey = "ctrl+cmd+s"
         
         try:
             # Register the hotkey
             keyboard.add_hotkey(hotkey, self.trigger_save_selection, suppress=False)
             self.log(f"✓ Global hotkey registered: {hotkey.upper()}")
-            self.log("  You can now press Ctrl+Alt+S from anywhere to trigger Save Selection!")
+            self.log("  You can now press Ctrl+Cmd+S from anywhere to trigger Save Selection!")
         except Exception as e:
             self.log(f"✗ Failed to register global hotkey: {str(e)}")
             messagebox.showwarning(
@@ -1103,7 +1042,7 @@ def main():
     parser.add_argument(
         "--disable-global-hotkey",
         action="store_true",
-        help="Skip registering the in-app Ctrl+Alt+S hotkey (used by the background listener)."
+        help="Skip registering the in-app Ctrl+Cmd+S hotkey (used by the background listener)."
     )
 
     args = parser.parse_args()

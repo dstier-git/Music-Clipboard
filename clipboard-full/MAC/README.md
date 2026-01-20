@@ -54,7 +54,6 @@ A desktop application for extracting pitches and metric positions from MuseScore
 
 2. **Manual Mode**:
    - Click "Browse..." to select a MuseScore file
-   - **Optional**: Check "Extract only specific measures" and enter a measure range (e.g., measures 5-10)
    - Click "Extract" to process it
    - Results will appear in the output area and be saved to a text file
 
@@ -105,8 +104,8 @@ All extracted files are saved to the `txts` folder in the project root directory
 
 ## Tips
 
-- **For selecting specific measures**: Use MuseScore's "Save Selection" feature - it's the easiest way to extract pitches from specific measures
-- **For processing full files**: Use manual mode and optionally specify a measure range
+- **For selecting specific measures**: Use MuseScore's "Save Selection" feature - it's the easiest way to extract pitches from a subset of measures
+- **For processing full files**: Use manual mode to extract the entire score
 - The watch folder feature is perfect for quickly processing selections from MuseScore
 - The GUI shows the first 10 extracted notes in the output area
 - You can clear the output area at any time

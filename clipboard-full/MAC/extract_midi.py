@@ -8,7 +8,7 @@ import shutil
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 MIDI_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "midis")
-
+DEFAULT_MIDI_TEMPO = 120
 
 def extract_midi_from_mscx(mscx_file_path, output_file_path=None, measure_range=None):
     """Extract MIDI from .mscx or .mscz file using MuseScore CLI or mido library
@@ -32,13 +32,10 @@ def extract_midi_from_mscx(mscx_file_path, output_file_path=None, measure_range=
         filename = base_name + ".mid"
         output_file_path = os.path.normpath(os.path.join(MIDI_OUTPUT_DIR_NORMALIZED, filename))
     
-    # Method 1: Try using MuseScore command-line tool (most reliable)
-    # On macOS, MuseScore is typically installed in Applications
+    # Common paths
     musescore_paths = [
         "/Applications/MuseScore 4.app/Contents/MacOS/mscore",
         "/Applications/MuseScore 4.app/Contents/MacOS/MuseScore4",
-        "/Applications/MuseScore 3.app/Contents/MacOS/mscore",
-        "/Applications/MuseScore 3.app/Contents/MacOS/MuseScore3",
         "/Applications/MuseScore.app/Contents/MacOS/mscore",
     ]
     
@@ -48,12 +45,12 @@ def extract_midi_from_mscx(mscx_file_path, output_file_path=None, measure_range=
             musescore_exe = path
             break
     
-    # Also try to find MuseScore in PATH
+    # Try MuseScore in PATH
     if musescore_exe is None:
-        musescore_exe = shutil.which("mscore") or shutil.which("MuseScore4") or shutil.which("MuseScore3")
+        musescore_exe = shutil.which("mscore") or shutil.which("MuseScore4")
     
     if musescore_exe:
-        # MuseScore CLI doesn't support measure ranges, so if measure_range is specified,
+        # If measure_range is specified,
         # we should use library-based method instead
         if measure_range is None:
             try:
@@ -110,16 +107,14 @@ def extract_midi_from_mscx(mscx_file_path, output_file_path=None, measure_range=
                 division = int(elem.text)
                 break
         
-        # Create MIDI file
         mid = MidiFile()
         track = MidiTrack()
         mid.tracks.append(track)
         
-        # Set tempo (default 120 BPM)
-        tempo = mido.bpm2tempo(120)
+        tempo = mido.bpm2tempo(DEFAULT_MIDI_TEMPO)
         track.append(Message('set_tempo', tempo=tempo, time=0))
         
-        # Extract notes with timing information
+        # Begin note extraction
         notes = []  # List of (tick, pitch, duration)
         
         # Get all measures and filter if measure_range is specified
