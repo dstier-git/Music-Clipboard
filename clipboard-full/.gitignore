@@ -12,6 +12,13 @@ __pycache__/
 .Spotlight-V100
 .Trashes
 
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
 # Virtual environments
 venv/
 env/
