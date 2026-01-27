@@ -1,0 +1,16 @@
+# Shared dependencies for MuseScore Pitch Extractor
+# Core dependencies (required)
+# Note: tkinter, xml.etree.ElementTree, and zipfile are part of Python standard library
+
+# Optional dependencies for automation features
+pyautogui>=0.9.54
+keyboard>=0.13.5
+psutil>=5.9.0
+
+# Windows-only automation helpers
+pywinauto>=0.6.8; platform_system == "Windows"
+pywin32>=300; platform_system == "Windows"
+
+# Optional dependencies for MIDI export
+mido>=1.2.10
+# music21>=8.0.0  # Alternative for MIDI export

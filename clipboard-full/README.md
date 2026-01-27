@@ -1,10 +1,11 @@
 # MuseScore Pitch Extractor
 
-A cross-platform toolkit for extracting pitch names and metric positions from MuseScore files (`.mscx`/`.mscz`). The GUI and scripts are tailored per operating system, but the same core extraction tools live in each platform folder so you can use either manual or automated workflows on macOS or Windows.
+A cross-platform toolkit for extracting pitch names and metric positions from MuseScore files (`.mscx`/`.mscz`). The GUI and scripts share a single unified implementation with OS-specific behavior handled automatically, so you can use either manual or automated workflows on macOS or Windows without maintaining separate codebases.
 
 ## Repository layout
-- `MAC/` – macOS GUI, automation helpers, and shell helpers (e.g., `run_gui.sh`).
-- `WIN/` – Windows GUI, automation helpers, global hotkey listener, and batch scripts.
+- `app/` - Unified, cross-platform implementation used by both macOS and Windows.
+- `MAC/` - macOS wrappers and shell helpers (e.g., `run_gui.sh`).
+- `WIN/` - Windows wrappers, batch scripts, and helpers.
 - `midis/`, `txts/`, and other shared folders store input/output artifacts created by either platform.
 
 ## Requirements
@@ -37,9 +38,9 @@ A cross-platform toolkit for extracting pitch names and metric positions from Mu
    - Set the watch folder (default `Documents/MuseScore4/Scores`) and click **Start Watching**.
    - In MuseScore, select measures and:
      - Click **Trigger Save Selection in MuseScore** in the app (requires `pyautogui`).
-     - Or save selection manually via **File → Save Selection** (`⇧⌘S`).
+     - Or save selection manually via **File > Save Selection** (`Shift+Cmd+S`).
    - MuseScore saves the selection to the watched folder and the app detects it automatically.
-4. macOS automation relies on AppleScript; grant accessibility permissions to Terminal/Python under **System Preferences → Security & Privacy → Privacy → Accessibility** if automation buttons stay disabled.
+4. macOS automation relies on AppleScript; grant accessibility permissions to Terminal/Python under **System Preferences > Security & Privacy > Privacy > Accessibility** if automation buttons stay disabled.
 
 ### Windows (`WIN/`)
 
@@ -53,13 +54,13 @@ A cross-platform toolkit for extracting pitch names and metric positions from Mu
    - In MuseScore, select measures and:
      - Hit the global hotkey `Ctrl+Alt+S` (after starting `hotkey_listener.py` or `run_hotkey_listener.bat`) to trigger Save Selection even when MuseScore runs in the background.
      - Or click **Trigger Save Selection** inside the GUI.
-     - Or use MuseScore’s native **File → Save Selection** (`Ctrl+Shift+S`).
+     - Or use MuseScore's native **File > Save Selection** (`Ctrl+Shift+S`).
    - Saved selections go into the watched folder and the app processes them automatically.
 4. To always listen for hotkeys, run `python hotkey_listener.py` or `run_hotkey_listener.bat` (add the batch file to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` for persistence). The listener writes requests to `musescore_hotkey_request.txt`, so the GUI can react even when it launches after a keypress.
 
 ## Shared command-line scripts
 
-The scripts available in each platform folder behave the same:
+The scripts available in each platform folder behave the same and are thin wrappers around the unified `app/` implementation:
 
 ```bash
 python extract_pitches.py
@@ -81,14 +82,14 @@ G4	M1:2.00	(tick: 480)
 ```
 
 ## Tips
-- Use MuseScore’s **Save Selection** to extract only the measures you care about.
+- Use MuseScore's **Save Selection** to extract only the measures you care about.
 - Auto mode is ideal for repeated extractions; manual mode works well for one-off full scores.
 - On macOS, the GUI previews the first 10 notes in the output region.
 - You can clear the output area at any time if it becomes crowded.
 - Saved selections already restrict the score to the selected measures, so no manual range is needed.
 
 ## Troubleshooting
-- **Import errors**: Ensure `extract_pitches_with_position.py` is beside `musescore_extractor_gui.py` in the same platform folder.
+- **Import errors**: Ensure the `app/` directory is present and the platform wrapper scripts (`MAC/` or `WIN/`) have not been moved out of the repository.
 - **No notes extracted**: Confirm the file is a valid `.mscx`/`.mscz` MuseScore file.
 - **Watch folder not detecting files**: Verify MuseScore saves selections to the configured folder.
 - **Automation buttons stay disabled**: Install the optional dependencies (`pyautogui`, `pywinauto`, `keyboard`) and grant accessibility permissions (macOS).
