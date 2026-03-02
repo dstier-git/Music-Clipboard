@@ -1,5 +1,6 @@
 import argparse
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -396,6 +397,7 @@ class MuseScoreExtractorApp:
         self.watch_thread = None
         self.processed_files = set()
         self.seen_output_type_files = set()
+        self._clear_confirm_queue = queue.Queue()
         self.output_format = tk.StringVar(value="Text")
         self.last_extracted_file = None
         self.delete_previous_var = tk.BooleanVar(value=True)
@@ -471,19 +473,17 @@ class MuseScoreExtractorApp:
         )
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
 
-        file_frame = ttk.LabelFrame(main_frame, text="File Selection", padding="10")
-        file_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
-        file_frame.columnconfigure(1, weight=1)
+        watch_frame = ttk.LabelFrame(main_frame, text="Auto-Process Saved Selections", padding="10")
+        watch_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        watch_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(file_frame, text="Select MuseScore File:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        self.file_path_var = tk.StringVar()
-        file_entry = ttk.Entry(file_frame, textvariable=self.file_path_var, width=50)
-        file_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
-        ttk.Button(file_frame, text="Browse...", command=self.browse_file).grid(row=0, column=2, padx=5)
-        ttk.Button(file_frame, text="Extract", command=self.extract_file).grid(row=0, column=3, padx=5)
+        ttk.Label(watch_frame, text="Watch Folder:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        watch_entry = ttk.Entry(watch_frame, textvariable=self.watch_folder, width=50, state="readonly")
+        watch_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
+        ttk.Button(watch_frame, text="Browse...", command=self.browse_watch_folder).grid(row=0, column=2, padx=5)
 
-        format_frame = ttk.Frame(file_frame)
-        format_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        format_frame = ttk.Frame(watch_frame)
+        format_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
         ttk.Label(format_frame, text="Output Format:").grid(row=0, column=0, padx=5)
         format_dropdown = ttk.Combobox(
             format_frame,
@@ -494,25 +494,8 @@ class MuseScoreExtractorApp:
         format_dropdown.current(0)
         format_dropdown.grid(row=0, column=1, padx=5)
 
-        # Replace with buttons instead:
-            # ttk.Radiobutton(format_frame, text="Text", variable=self.output_format, value="text").grid(
-            #     row=0, column=1, padx=5
-            # )
-            # ttk.Radiobutton(format_frame, text="MIDI", variable=self.output_format, value="midi").grid(
-            #     row=0, column=2, padx=5
-            # )
-
-        watch_frame = ttk.LabelFrame(main_frame, text="Auto-Process Saved Selections", padding="10")
-        watch_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
-        watch_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(watch_frame, text="Watch Folder:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        watch_entry = ttk.Entry(watch_frame, textvariable=self.watch_folder, width=50)
-        watch_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
-        ttk.Button(watch_frame, text="Browse...", command=self.browse_watch_folder).grid(row=0, column=2, padx=5)
-
         automation_frame = ttk.Frame(watch_frame)
-        automation_frame.grid(row=1, column=0, columnspan=3, pady=5, sticky=tk.W)
+        automation_frame.grid(row=2, column=0, columnspan=3, pady=5, sticky=tk.W)
 
         self.save_selection_button = ttk.Button(
             automation_frame,
@@ -568,32 +551,29 @@ class MuseScoreExtractorApp:
                 ).grid(row=1, column=0, columnspan=2, padx=5, sticky=tk.W)
 
         self.watch_button = ttk.Button(watch_frame, text="Start Watching", command=self.toggle_watch)
-        self.watch_button.grid(row=2, column=0, columnspan=3, pady=10)
+        self.watch_button.grid(row=3, column=0, columnspan=3, pady=10)
 
         self.watch_status_label = ttk.Label(watch_frame, text="Status: Not watching", foreground="gray")
-        self.watch_status_label.grid(row=3, column=0, columnspan=3)
+        self.watch_status_label.grid(row=4, column=0, columnspan=3)
 
         instructions = f"""
 Instructions:
-1. Manual Mode:
-   - Select a .mscx or .mscz file
-   - Click 'Extract' to process
-2. Auto Mode (Save Selection):
+1. Auto Mode (Save Selection):
    - Set the watch folder (where MuseScore saves selections), click 'Start Watching'
    - In MuseScore: Select the measures you want to extract
-   - Click 'Trigger Save Selection in MuseScore' button (or manually: File > Save Selection)
+   - Click 'Trigger Save Selection in MuseScore' button (or use File > Save Selection)
    - Save in the watch folder
    - Shortcut reminder: {SAVE_SELECTION_SHORTCUT_LABEL}
         """
         ttk.Label(watch_frame, text=instructions.strip(), justify=tk.LEFT, foreground="gray").grid(
-            row=4, column=0, columnspan=3, pady=10, sticky=tk.W
+            row=5, column=0, columnspan=3, pady=10, sticky=tk.W
         )
 
         output_frame = ttk.LabelFrame(main_frame, text="Output", padding="10")
-        output_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        output_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)
+        main_frame.rowconfigure(2, weight=1)
 
         self.output_text = scrolledtext.ScrolledText(output_frame, height=15, width=80, wrap=tk.WORD)
         self.output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -616,14 +596,6 @@ Instructions:
             text="Auto-delete previous extraction",
             variable=self.delete_previous_var,
         ).grid(row=0, column=2, padx=5)
-
-    def browse_file(self):
-        filename = filedialog.askopenfilename(
-            title="Select MuseScore File",
-            filetypes=[("MuseScore files", "*.mscx *.mscz"), ("All files", "*.*")],
-        )
-        if filename:
-            self.file_path_var.set(filename)
 
     def browse_watch_folder(self):
         folder = filedialog.askdirectory(title="Select Folder to Watch")
@@ -673,25 +645,67 @@ Instructions:
 
         self.root.after(0, do_bring)
 
-    def _move_to_output_dir(self, src_path, output_ext):
+    def _process_clear_confirm_queue(self):
+        """Run on main thread: show warning and get user OK/Cancel when output folder has wrong-extension files."""
+        try:
+            request = self._clear_confirm_queue.get_nowait()
+        except queue.Empty:
+            return
+        dest_dir, wrong_ext_files, _all_files, _src_path, output_ext, response_queue = request
+        format_name = "MIDI" if output_ext == ".mid" else "Text"
+        expected_ext = ".mid" if output_ext == ".mid" else ".txt"
+        file_list = "\n".join(f"  • {os.path.basename(p)}" for p in wrong_ext_files)
+        msg = (
+            f"The output folder contains file(s) that are not {format_name} format (expected {expected_ext}):\n\n"
+            f"{file_list}\n\n"
+            "Everything in the output folder will be deleted, then the new file will be moved in.\n\n"
+            "Continue?"
+        )
+        ok = messagebox.askokcancel("Clear output folder?", msg)
+        try:
+            response_queue.put(ok)
+        except Exception:
+            pass
+
+    def _clear_output_folder_and_move(self, src_path, output_ext):
         """
-        Move a file into the app's output directory for the selected format.
-        Returns the destination path on success, None on failure.
-        Uses unique naming (e.g. "name (1).txt") if the destination already exists.
+        Delete everything in the output folder for this format, then move src_path into it.
+        If any existing file has an extension other than the selected output format, show a warning and Cancel option.
+        Returns the destination path on success, None on cancel or failure.
         """
         if not src_path or not os.path.exists(src_path):
             return None
         dest_dir = Path(MIDI_OUTPUT_DIR) if output_ext == ".mid" else Path(OUTPUT_DIR)
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            name = os.path.basename(src_path)
-            dest_path = dest_dir / name
-            if dest_path.exists():
-                stem, ext = os.path.splitext(name)
-                n = 1
-                while (dest_dir / f"{stem} ({n}){ext}").exists():
-                    n += 1
-                dest_path = dest_dir / f"{stem} ({n}){ext}"
+            all_entries = list(dest_dir.iterdir())
+            all_files = [p for p in all_entries if p.is_file()]
+            wrong_ext_files = [p for p in all_files if p.suffix.lower() != output_ext]
+
+            if wrong_ext_files:
+                response_queue = queue.Queue()
+                self._clear_confirm_queue.put(
+                    (dest_dir, wrong_ext_files, all_files, src_path, output_ext, response_queue)
+                )
+                self.root.after(0, self._process_clear_confirm_queue)
+                while self.watching:
+                    try:
+                        proceed = response_queue.get(timeout=0.5)
+                        break
+                    except queue.Empty:
+                        continue
+                else:
+                    return None
+                if not proceed:
+                    return None
+
+            for p in all_files:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+            dest_path = dest_dir / os.path.basename(src_path)
             shutil.move(src_path, dest_path)
             return str(dest_path)
         except Exception:
@@ -739,12 +753,9 @@ Instructions:
         self.root.after(0, lambda: self.open_location_button.config(state="normal"))
         self.root.after(0, self.open_file_location)
 
-    def extract_file(self, file_path=None):
-        if file_path is None:
-            file_path = self.file_path_var.get().strip().strip('"').strip("'")
-
+    def extract_file(self, file_path):
         if not file_path:
-            messagebox.showwarning("Warning", "Please select a file first.")
+            messagebox.showwarning("Warning", "No file provided for auto-processing.")
             return
 
         if not os.path.exists(file_path):
@@ -918,14 +929,14 @@ Instructions:
                         full_path = os.path.join(folder, file)
                         current_output_files.add(full_path)
                         if full_path not in self.seen_output_type_files:
-                            dest_path = self._move_to_output_dir(full_path, output_ext)
-                            self.seen_output_type_files.add(full_path)
-                            self.root.after(0, self._bring_app_to_front)
-                            if dest_path:
+                            dest_path = self._clear_output_folder_and_move(full_path, output_ext)
+                            if dest_path is not None:
+                                self.seen_output_type_files.add(full_path)
+                                self.root.after(0, self._bring_app_to_front)
                                 self.root.after(0, lambda p=dest_path: self._reveal_file_in_folder(p))
-                                self.log(f"Moved {os.path.basename(full_path)} to output folder: {dest_path}")
+                                self.log(f"Cleared output folder and moved {os.path.basename(full_path)} to: {dest_path}")
                             else:
-                                self.log(f"Failed to move {os.path.basename(full_path)} to output folder")
+                                self.log(f"Skipped or failed moving {os.path.basename(full_path)} to output folder")
 
                 self.seen_output_type_files.intersection_update(current_output_files)
                 time.sleep(1)
@@ -1062,8 +1073,8 @@ Instructions:
                         "Error",
                         "Could not send keyboard shortcut to MuseScore.\n\n"
                         "Please check the output log for details.\n\n"
-                        "You can still use the manual method:\n"
-                        f"File > Save Selection (or {SAVE_SELECTION_SHORTCUT_LABEL})",
+                        "You can still use File > Save Selection "
+                        f"(or {SAVE_SELECTION_SHORTCUT_LABEL}).",
                     ),
                 )
 
@@ -1326,8 +1337,8 @@ Instructions:
                         "Error",
                         "Could not send keyboard shortcut to MuseScore.\n\n"
                         "Please check the output log for details.\n\n"
-                        "You can still use the manual method:\n"
-                        f"File > Save Selection (or {SAVE_SELECTION_SHORTCUT_LABEL})",
+                        "You can still use File > Save Selection "
+                        f"(or {SAVE_SELECTION_SHORTCUT_LABEL}).",
                     ),
                 )
 
