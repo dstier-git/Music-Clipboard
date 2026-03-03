@@ -1,16 +1,18 @@
-# MuseScore Pitch Extractor
+# Music Clipboard with AI
 
-A cross-platform toolkit for extracting pitch names and metric positions from MuseScore files (`.mscx`/`.mscz`). The GUI and scripts share a single unified implementation with OS-specific behavior handled automatically, so you can use either manual or automated workflows on macOS or Windows without maintaining separate codebases.
+A cross-platform music clipboard for extracting pitch names and metric positions from MuseScore files (`.mscx`/`.mscz`) or MIDI data and handing them off to AI-assisted editing workflows. The GUI and scripts share one unified implementation with OS-specific behavior handled automatically, so you can use manual or automated flows on macOS and Windows without maintaining separate codebases.
+
+The core idea: capture the exact musical fragment you want, then let AI help turn rough joins into transitions that feel smoother and more refined.
 
 ## Repository layout
-- `app/` - Unified, cross-platform implementation used by both macOS and Windows.
+- `app/` - Unified, cross-platform backend infrastructure.
 - `MAC/` - macOS wrappers and shell helpers (e.g., `run_gui.sh`).
 - `WIN/` - Windows wrappers, batch scripts, and helpers.
-- `midis/`, `txts/`, and other shared folders store input/output artifacts created by either platform.
+- `midis/`, `txts/`, and other shared folders store extracted clipboard artifacts created by either platform.
 
 ## Requirements
 1. Python 3.6 or newer.
-2. Standard libs that ship with Python:
+2. Standard, shipped Python libraries:
    - `tkinter` for the GUI.
    - `xml.etree.ElementTree` for parsing MuseScore XML.
    - `zipfile` to read compressed `.mscz` scores.
@@ -22,7 +24,7 @@ A cross-platform toolkit for extracting pitch names and metric positions from Mu
    - `pywinauto` and `keyboard` power the Windows automation and global hotkey listener.
    - `psutil` helps the worker scripts detect MuseScore and coordinate with the hotkey listener.
 
-> The GUI will run without the optional deps, but the automation buttons, hotkey listener, and background helpers remain disabled.
+> The GUI runs without optional deps, but automation buttons, hotkey listener, and background helpers stay disabled.
 
 ## Platform-specific workflows
 
@@ -37,13 +39,14 @@ A cross-platform toolkit for extracting pitch names and metric positions from Mu
 3. **Auto Mode**:
    - Set the watch folder (default `Documents/MuseScore4/Scores`) and click **Start Watching**.
    - For each accepted new `.mscx`/`.mscz` file, the app now:
-     - Runs the existing extraction workflow.
+     - Runs the extraction workflow.
      - Prompts for an AI edit instruction.
      - Sends `Connect to musescore and ...` to Claude Desktop (auto-paste + Enter), then lets Claude MCP execute.
+     - Enables quick AI polishing prompts focused on smoother, cleaner transitions between phrases.
    - In MuseScore, select measures and:
      - Click **Trigger Save Selection in MuseScore** in the app (requires `pyautogui`).
      - Or save selection manually via **File > Save Selection** (`Shift+Cmd+S`).
-   - MuseScore saves the selection to the watched folder and the app detects it automatically.
+   - MuseScore saves the selection to the watched folder and the app detects it automatically as a clipboard-ready fragment.
    - Rate limit: only one new score file is processed per 60-second window. Additional score files in that window are ignored with no action.
    - Claude requirement: Claude Desktop must already be running before MuseScore is opened for AI automation.
    - If opening MuseScore 4 fails, the app shows an error and cancels Claude sending for that file.
@@ -62,7 +65,7 @@ A cross-platform toolkit for extracting pitch names and metric positions from Mu
      - Hit the global hotkey `Ctrl+Alt+S` (after starting `hotkey_listener.py` or `run_hotkey_listener.bat`) to trigger Save Selection even when MuseScore runs in the background.
      - Or click **Trigger Save Selection** inside the GUI.
      - Or use MuseScore's native **File > Save Selection** (`Ctrl+Shift+S`).
-   - Saved selections go into the watched folder and the app processes them automatically.
+   - Saved selections go into the watched folder and the app processes them automatically for clipboard + AI refinement flow.
 4. To always listen for hotkeys, run `python hotkey_listener.py` or `run_hotkey_listener.bat` (add the batch file to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` for persistence). The listener writes requests to `musescore_hotkey_request.txt`, so the GUI can react even when it launches after a keypress.
 
 ## Shared command-line scripts
@@ -74,7 +77,7 @@ python extract_pitches.py
 python extract_pitches_with_position.py
 ```
 
-Both prompt for a MuseScore file path, extract pitch names and optional metric positions, and produce a simple text file in the target folder.
+Both prompt for a MuseScore file path, extract pitch names and optional metric positions, and produce a simple text file in the target folder. These text outputs are ideal for quick AI prompt context when refining musical continuity.
 
 ## Output format
 - **Pitch**: Note name (e.g., `C4`, `E5`, `F#3`).
@@ -90,10 +93,11 @@ G4	M1:2.00	(tick: 480)
 
 ## Tips
 - Use MuseScore's **Save Selection** to extract only the measures you care about.
-- Auto mode is ideal for repeated extractions; manual mode works well for one-off full scores.
+- Auto mode is ideal for repeated clipboard captures; manual mode works well for one-off full scores.
 - On macOS, the GUI previews the first 10 notes in the output region.
 - You can clear the output area at any time if it becomes crowded.
 - Saved selections already restrict the score to the selected measures, so no manual range is needed.
+- For better AI edits, include intent in your instruction (for example: "make the transition into the chorus smoother, keep harmonic tension, and avoid abrupt leaps").
 
 ## Troubleshooting
 - **Import errors**: Ensure the `app/` directory is present and the platform wrapper scripts (`MAC/` or `WIN/`) have not been moved out of the repository.
