@@ -1205,6 +1205,33 @@ class MuseScoreExtractorApp:
         except Exception as exc:
             return False, str(exc)
 
+    def _start_musescore_websocket_plugin(self):
+        if not IS_MACOS:
+            return False, "MuseScore plugin shortcut automation is only supported on macOS."
+
+        hotkey, hotkey_error = _normalize_hotkey_value("ctrl+cmd+p", "mac")
+        if not hotkey:
+            return False, hotkey_error or "Invalid MuseScore plugin shortcut."
+
+        last_error = "MuseScore process not found."
+        for _ in range(20):
+            found, _, find_error = self._find_program_window_macos("musescore")
+            if found:
+                activated, _, activate_error = self._activate_program_window_macos("musescore")
+                if activated:
+                    time.sleep(0.15)
+                    sent, _, send_error = self._send_hotkey_macos(hotkey)
+                    if sent:
+                        return True, ""
+                    last_error = send_error or "Could not send macOS shortcut"
+                else:
+                    last_error = activate_error or "Could not activate MuseScore."
+            else:
+                last_error = find_error or "MuseScore process not found."
+            time.sleep(0.2)
+
+        return False, last_error
+
     def _send_prompt_to_claude(self, prompt_text):
         if not IS_MACOS:
             return False, "Claude automation is only supported on macOS for this flow."
@@ -1261,6 +1288,17 @@ class MuseScoreExtractorApp:
                 return
 
             time.sleep(0.3)
+            plugin_started, plugin_error = self._start_musescore_websocket_plugin()
+            if not plugin_started:
+                error_msg = (
+                    "Opened MuseScore 4, but failed to start the websocket plugin shortcut (Ctrl+Cmd+P).\n\n"
+                    f"Details: {plugin_error}\n\nClaude send was canceled."
+                )
+                self.log(f"Error: {error_msg}")
+                self._show_error_async("MuseScore Plugin Start Failed", error_msg)
+                return
+
+            time.sleep(0.1)
             sent, send_error = self._send_prompt_to_claude(prompt_text)
             if not sent:
                 error_msg = f"Failed to send prompt to Claude: {send_error}"
