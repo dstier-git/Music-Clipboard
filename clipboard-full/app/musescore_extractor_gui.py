@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import queue
 import shutil
@@ -14,7 +15,7 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.platform_utils import IS_MACOS, IS_WINDOWS, default_hotkey, output_dirs, save_selection_shortcut_label
+from app.platform_utils import IS_MACOS, IS_WINDOWS, default_hotkey, output_dirs
 
 # Try to import automation libraries
 try:
@@ -68,7 +69,45 @@ EXTRACTABLE_SCORE_EXTENSIONS = (".mscx", ".mscz")
 OUTPUT_DIR, MIDI_OUTPUT_DIR = output_dirs()
 
 GLOBAL_HOTKEY = default_hotkey()
-SAVE_SELECTION_SHORTCUT_LABEL = save_selection_shortcut_label()
+
+PROGRAM_PROFILES = {
+    "musescore": {
+        "label": "MuseScore",
+        "mac_process_names": ["mscore", "MuseScore 4", "MuseScore 3", "MuseScore"],
+        "mac_app_names": ["MuseScore 4", "MuseScore 3", "MuseScore"],
+        "mac_contains": ["musescore", "mscore"],
+        "windows_process_keywords": ["musescore4.exe", "musescore", "mscore"],
+        "windows_title_keywords": ["musescore 4", "musescore"],
+        "default_hotkeys": {
+            "mac": "cmd+shift+s",
+            "windows": "ctrl+shift+s",
+        },
+    },
+    "logic_pro": {
+        "label": "Logic Pro",
+        "mac_process_names": ["Logic Pro", "Logic Pro X"],
+        "mac_app_names": ["Logic Pro", "Logic Pro X"],
+        "mac_contains": ["logic pro", "logic"],
+        "windows_process_keywords": ["logic", "logicpro"],
+        "windows_title_keywords": ["logic pro", "logic"],
+        "default_hotkeys": {
+            "mac": "cmd+alt+e",
+            "windows": "",
+        },
+    },
+}
+
+PROGRAM_ORDER = ["musescore", "logic_pro"]
+HOTKEY_MODIFIER_ORDER = ["cmd", "ctrl", "alt", "shift"]
+HOTKEY_MODIFIER_ALIASES = {
+    "cmd": "cmd",
+    "command": "cmd",
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "alt": "alt",
+    "option": "alt",
+    "shift": "shift",
+}
 
 EXTRACTION_FUNCTION = None
 MIDI_EXTRACTION_FUNCTION = None
@@ -103,13 +142,88 @@ except ImportError:
 
 
 def _format_hotkey_label(hotkey):
+    if not hotkey:
+        return "Not configured"
     parts = []
     for part in hotkey.split("+"):
         if part == "cmd":
             parts.append("Cmd")
+        elif part == "space":
+            parts.append("Space")
         else:
             parts.append(part.capitalize())
     return "+".join(parts)
+
+
+
+def _current_platform_key():
+    return "mac" if IS_MACOS else "windows" if IS_WINDOWS else "other"
+
+
+def _normalize_hotkey_value(raw_hotkey, platform_key):
+    text = (raw_hotkey or "").strip().lower()
+    if not text:
+        return "", None
+
+    tokens = [token.strip() for token in text.split("+") if token.strip()]
+    if not tokens:
+        return "", "Hotkey is empty."
+
+    modifiers = []
+    key_tokens = []
+    for token in tokens:
+        mapped = HOTKEY_MODIFIER_ALIASES.get(token, token)
+        if mapped in HOTKEY_MODIFIER_ORDER:
+            if mapped not in modifiers:
+                modifiers.append(mapped)
+        else:
+            key_tokens.append(mapped)
+
+    if len(key_tokens) != 1:
+        return "", "Hotkey must contain exactly one non-modifier key."
+
+    key = key_tokens[0]
+    if key == "space":
+        key = "space"
+    elif len(key) != 1:
+        return "", "Only single-character keys (or 'space') are supported."
+    elif not key.isalnum():
+        return "", "Only alphanumeric keys (or 'space') are supported."
+
+    if platform_key == "windows" and "cmd" in modifiers:
+        return "", "Windows hotkeys cannot use 'cmd'. Use ctrl/alt/shift."
+
+    ordered_modifiers = [mod for mod in HOTKEY_MODIFIER_ORDER if mod in modifiers]
+    normalized = "+".join(ordered_modifiers + [key])
+    return normalized, None
+
+
+def _split_normalized_hotkey(normalized_hotkey):
+    parts = [part for part in (normalized_hotkey or "").split("+") if part]
+    if not parts:
+        return [], ""
+    key = parts[-1]
+    modifiers = parts[:-1]
+    return modifiers, key
+
+
+def _hotkey_to_windows_pywinauto(normalized_hotkey):
+    modifiers, key = _split_normalized_hotkey(normalized_hotkey)
+    prefix = ""
+    if "ctrl" in modifiers:
+        prefix += "^"
+    if "alt" in modifiers:
+        prefix += "%"
+    if "shift" in modifiers:
+        prefix += "+"
+
+    if key == "space":
+        key_token = "{SPACE}"
+    elif key in ["+", "^", "%", "~", "(", ")", "{", "}"]:
+        key_token = "{" + key + "}"
+    else:
+        key_token = key
+    return prefix + key_token
 
 
 def run_applescript(script):
@@ -404,6 +518,8 @@ class MuseScoreExtractorApp:
         self.last_extracted_file = None
         self.delete_previous_var = tk.BooleanVar(value=True)
         self.preferences = self.load_preferences()
+        self.visible_programs = list(self.preferences.get("visible_programs", PROGRAM_ORDER))
+        self.custom_hotkeys = dict(self.preferences.get("custom_hotkeys", {}))
         self._hotkey_monitor_stop = threading.Event()
         self._last_hotkey_request = 0
         self._pynput_listener = None
@@ -422,28 +538,123 @@ class MuseScoreExtractorApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def load_preferences(self):
+        defaults = {
+            "watch_folder": "",
+            "watching": False,
+            "selected_program": "musescore",
+            "visible_programs": list(PROGRAM_ORDER),
+            "custom_hotkeys": {},
+        }
+
         if not CONFIG_FILE.exists():
-            return {}
+            return defaults
+
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                lines = [line.rstrip("\n") for line in f.readlines()]
-            folder = lines[0] if lines else ""
-            watching = False
-            if len(lines) > 1:
-                watching = lines[1].strip().lower() == "true"
-            return {"watch_folder": folder, "watching": watching}
+            raw_content = CONFIG_FILE.read_text(encoding="utf-8")
         except Exception:
-            return {}
+            return defaults
+
+        try:
+            loaded = json.loads(raw_content)
+        except json.JSONDecodeError:
+            # Backward compatibility with legacy 2-line format.
+            lines = [line.rstrip("\n") for line in raw_content.splitlines()]
+            folder = lines[0] if lines else ""
+            watching = len(lines) > 1 and lines[1].strip().lower() == "true"
+            merged = dict(defaults)
+            merged["watch_folder"] = folder
+            merged["watching"] = watching
+            return merged
+
+        if not isinstance(loaded, dict):
+            return defaults
+
+        merged = dict(defaults)
+        merged.update({k: v for k, v in loaded.items() if k in merged})
+
+        visible_programs = merged.get("visible_programs")
+        if not isinstance(visible_programs, list):
+            visible_programs = list(PROGRAM_ORDER)
+        visible_programs = [pid for pid in visible_programs if pid in PROGRAM_PROFILES]
+        if not visible_programs:
+            visible_programs = list(PROGRAM_ORDER)
+        merged["visible_programs"] = visible_programs
+
+        selected_program = merged.get("selected_program")
+        if selected_program not in PROGRAM_PROFILES:
+            selected_program = "musescore"
+        if selected_program not in visible_programs:
+            selected_program = visible_programs[0]
+        merged["selected_program"] = selected_program
+
+        custom_hotkeys = merged.get("custom_hotkeys")
+        if not isinstance(custom_hotkeys, dict):
+            custom_hotkeys = {}
+        normalized_custom = {}
+        platform_key = _current_platform_key()
+        for pid, raw_hotkey in custom_hotkeys.items():
+            if pid not in PROGRAM_PROFILES:
+                continue
+            normalized, error = _normalize_hotkey_value(raw_hotkey, platform_key)
+            if error:
+                continue
+            normalized_custom[pid] = normalized
+        merged["custom_hotkeys"] = normalized_custom
+        return merged
+
+    def _get_program_label(self, program_id):
+        profile = PROGRAM_PROFILES.get(program_id, PROGRAM_PROFILES["musescore"])
+        return profile["label"]
+
+    def _get_selected_program_id(self):
+        selected = self.selected_program_var.get() if hasattr(self, "selected_program_var") else ""
+        if selected in self.visible_programs:
+            return selected
+        if self.visible_programs:
+            fallback = self.visible_programs[0]
+            if hasattr(self, "selected_program_var"):
+                self.selected_program_var.set(fallback)
+            return fallback
+        if hasattr(self, "selected_program_var"):
+            self.selected_program_var.set("musescore")
+        return "musescore"
+
+    def _get_program_default_hotkey(self, program_id):
+        profile = PROGRAM_PROFILES.get(program_id, PROGRAM_PROFILES["musescore"])
+        return profile["default_hotkeys"].get(_current_platform_key(), "")
+
+    def _resolve_effective_hotkey(self, program_id=None):
+        target_program = program_id or self._get_selected_program_id()
+        custom = (self.custom_hotkeys.get(target_program) or "").strip().lower()
+        candidate = custom or self._get_program_default_hotkey(target_program)
+        if not candidate:
+            return None, (
+                f"{self._get_program_label(target_program)} has no default shortcut on this platform. "
+                "Set one in Settings."
+            )
+        normalized, error = _normalize_hotkey_value(candidate, _current_platform_key())
+        if error:
+            return None, error
+        return normalized, None
 
     def save_preferences(self, watching_override=None):
         folder = self.watch_folder.get()
         watching = self.watching if watching_override is None else watching_override
-        self.preferences = {"watch_folder": folder, "watching": watching}
+        selected_program = self.selected_program_var.get() if hasattr(self, "selected_program_var") else "musescore"
+        if selected_program not in self.visible_programs and self.visible_programs:
+            selected_program = self.visible_programs[0]
+
+        self.preferences = {
+            "watch_folder": folder,
+            "watching": watching,
+            "selected_program": selected_program,
+            "visible_programs": list(self.visible_programs),
+            "custom_hotkeys": dict(self.custom_hotkeys),
+        }
         try:
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                f.write(f"{folder}\n")
-                f.write("true\n" if watching else "false\n")
+                json.dump(self.preferences, f, indent=2)
         except Exception as exc:
             self.log(f"Warning: Could not save preferences: {exc}")
 
@@ -458,28 +669,67 @@ class MuseScoreExtractorApp:
         else:
             self.watch_folder.set(os.path.join(os.path.expanduser("~"), "Documents"))
 
+        selected_program = self.preferences.get("selected_program", "musescore")
+        if selected_program not in self.visible_programs and self.visible_programs:
+            selected_program = self.visible_programs[0]
+        elif selected_program not in PROGRAM_PROFILES:
+            selected_program = "musescore"
+        self.selected_program_var.set(selected_program)
+        self._refresh_program_dropdown()
+        self._update_program_dependent_ui()
+
         if self.preferences.get("watching"):
             folder = self.watch_folder.get().strip()
             if folder and os.path.exists(folder):
                 self.root.after(200, self.toggle_watch)
 
     def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
+
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+
+        self.selected_program_var = tk.StringVar(value=self.preferences.get("selected_program", "musescore"))
+        self.selected_program_display_var = tk.StringVar()
+        self.visible_program_vars = {
+            pid: tk.BooleanVar(value=pid in self.visible_programs) for pid in PROGRAM_ORDER
+        }
+        self.custom_hotkey_vars = {
+            pid: tk.StringVar(value=self.custom_hotkeys.get(pid, "")) for pid in PROGRAM_ORDER
+        }
+
+        notebook = ttk.Notebook(main_frame)
+        notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        self.main_tab = ttk.Frame(notebook, padding="10")
+        self.settings_tab = ttk.Frame(notebook, padding="10")
+        notebook.add(self.main_tab, text="Main")
+        notebook.add(self.settings_tab, text="Settings")
+
+        self._build_main_tab()
+        self._build_settings_tab()
+
+        self.selected_program_dropdown.bind("<<ComboboxSelected>>", self._on_selected_program_changed)
+        self._refresh_program_dropdown()
+        self._update_program_dependent_ui()
+
+    def _build_main_tab(self):
+        main_tab = self.main_tab
+        main_tab.columnconfigure(0, weight=1)
+        main_tab.rowconfigure(2, weight=1)
 
         title_label = ttk.Label(
-            main_frame,
-            text="MuseScore Pitch & Position Extractor",
+            main_tab,
+            text="Music Clipboard Extractor",
             font=("Arial", 16, "bold"),
         )
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label.grid(row=0, column=0, pady=(0, 20), sticky=tk.W)
 
-        watch_frame = ttk.LabelFrame(main_frame, text="Auto-Process Saved Selections", padding="10")
-        watch_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        watch_frame = ttk.LabelFrame(main_tab, text="Auto-Process Saved Selections", padding="10")
+        watch_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
         watch_frame.columnconfigure(1, weight=1)
 
         ttk.Label(watch_frame, text="Watch Folder:").grid(row=0, column=0, sticky=tk.W, padx=5)
@@ -499,12 +749,23 @@ class MuseScoreExtractorApp:
         format_dropdown.current(0)
         format_dropdown.grid(row=0, column=1, padx=5)
 
+        program_frame = ttk.Frame(watch_frame)
+        program_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        ttk.Label(program_frame, text="Target Program:").grid(row=0, column=0, padx=5)
+        self.selected_program_dropdown = ttk.Combobox(
+            program_frame,
+            textvariable=self.selected_program_display_var,
+            state="readonly",
+            width=22,
+        )
+        self.selected_program_dropdown.grid(row=0, column=1, padx=5)
+
         automation_frame = ttk.Frame(watch_frame)
-        automation_frame.grid(row=2, column=0, columnspan=3, pady=5, sticky=tk.W)
+        automation_frame.grid(row=3, column=0, columnspan=3, pady=5, sticky=tk.W)
 
         self.save_selection_button = ttk.Button(
             automation_frame,
-            text="Trigger Save Selection in MuseScore",
+            text="Trigger Save/Export",
             command=self.trigger_save_selection,
         )
         self.save_selection_button.grid(row=0, column=0, padx=5)
@@ -556,29 +817,18 @@ class MuseScoreExtractorApp:
                 ).grid(row=1, column=0, columnspan=2, padx=5, sticky=tk.W)
 
         self.watch_button = ttk.Button(watch_frame, text="Start Watching", command=self.toggle_watch)
-        self.watch_button.grid(row=3, column=0, columnspan=3, pady=10)
+        self.watch_button.grid(row=4, column=0, columnspan=3, pady=10)
 
         self.watch_status_label = ttk.Label(watch_frame, text="Status: Not watching", foreground="gray")
-        self.watch_status_label.grid(row=4, column=0, columnspan=3)
+        self.watch_status_label.grid(row=5, column=0, columnspan=3)
 
-        instructions = f"""
-Instructions:
-1. Auto Mode (Save Selection):
-   - Set the watch folder (where MuseScore saves selections), click 'Start Watching'
-   - In MuseScore: Select the measures you want to extract
-   - Click 'Trigger Save Selection in MuseScore' button (or use File > Save Selection)
-   - Save in the watch folder
-   - Shortcut reminder: {SAVE_SELECTION_SHORTCUT_LABEL}
-        """
-        ttk.Label(watch_frame, text=instructions.strip(), justify=tk.LEFT, foreground="gray").grid(
-            row=5, column=0, columnspan=3, pady=10, sticky=tk.W
-        )
+        self.instructions_label = ttk.Label(watch_frame, justify=tk.LEFT, foreground="gray")
+        self.instructions_label.grid(row=6, column=0, columnspan=3, pady=10, sticky=tk.W)
 
-        output_frame = ttk.LabelFrame(main_frame, text="Output", padding="10")
-        output_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        output_frame = ttk.LabelFrame(main_tab, text="Output", padding="10")
+        output_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1)
 
         self.output_text = scrolledtext.ScrolledText(output_frame, height=15, width=80, wrap=tk.WORD)
         self.output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -601,6 +851,145 @@ Instructions:
             text="Auto-delete previous extraction",
             variable=self.delete_previous_var,
         ).grid(row=0, column=2, padx=5)
+
+    def _build_settings_tab(self):
+        settings_tab = self.settings_tab
+        settings_tab.columnconfigure(0, weight=1)
+
+        settings_frame = ttk.LabelFrame(settings_tab, text="Program Visibility & Hotkeys", padding="10")
+        settings_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), pady=5)
+        settings_frame.columnconfigure(2, weight=1)
+
+        ttk.Label(
+            settings_frame,
+            text=(
+                "Control which programs appear in the main dropdown and override the save/export shortcut per program.\n"
+                "Leave custom hotkey blank to use platform default."
+            ),
+            justify=tk.LEFT,
+            foreground="gray",
+        ).grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 12))
+
+        ttk.Label(settings_frame, text="Program", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Label(settings_frame, text="Show", font=("Arial", 10, "bold")).grid(row=1, column=1, sticky=tk.W, padx=5)
+        ttk.Label(settings_frame, text="Custom Hotkey", font=("Arial", 10, "bold")).grid(row=1, column=2, sticky=tk.W, padx=5)
+        ttk.Label(settings_frame, text="Default", font=("Arial", 10, "bold")).grid(row=1, column=3, sticky=tk.W, padx=5)
+        ttk.Label(settings_frame, text="Action", font=("Arial", 10, "bold")).grid(row=1, column=4, sticky=tk.W, padx=5)
+
+        row = 2
+        for pid in PROGRAM_ORDER:
+            ttk.Label(settings_frame, text=self._get_program_label(pid)).grid(row=row, column=0, sticky=tk.W, padx=5, pady=4)
+            ttk.Checkbutton(settings_frame, variable=self.visible_program_vars[pid]).grid(
+                row=row, column=1, sticky=tk.W, padx=5, pady=4
+            )
+            ttk.Entry(settings_frame, textvariable=self.custom_hotkey_vars[pid], width=24).grid(
+                row=row, column=2, sticky=(tk.W, tk.E), padx=5, pady=4
+            )
+            default_hotkey = self._get_program_default_hotkey(pid)
+            default_label = _format_hotkey_label(default_hotkey) if default_hotkey else "No default"
+            ttk.Label(settings_frame, text=default_label, foreground="gray").grid(
+                row=row, column=3, sticky=tk.W, padx=5, pady=4
+            )
+            ttk.Button(
+                settings_frame,
+                text="Reset",
+                command=lambda target=pid: self._reset_custom_hotkey(target),
+            ).grid(row=row, column=4, sticky=tk.W, padx=5, pady=4)
+            row += 1
+
+        ttk.Button(settings_tab, text="Save Settings", command=self._save_settings).grid(
+            row=1, column=0, sticky=tk.E, pady=8
+        )
+
+    def _refresh_program_dropdown(self):
+        available_ids = [pid for pid in PROGRAM_ORDER if pid in self.visible_programs]
+        if not available_ids:
+            available_ids = ["musescore"]
+        labels = [self._get_program_label(pid) for pid in available_ids]
+        self.selected_program_dropdown["values"] = labels
+
+        selected_id = self.selected_program_var.get()
+        if selected_id not in available_ids:
+            selected_id = available_ids[0]
+            self.selected_program_var.set(selected_id)
+        self.selected_program_display_var.set(self._get_program_label(selected_id))
+
+    def _on_selected_program_changed(self, _event=None):
+        selected_label = self.selected_program_display_var.get()
+        program_id = next(
+            (pid for pid in PROGRAM_ORDER if self._get_program_label(pid) == selected_label),
+            "musescore",
+        )
+        if program_id not in self.visible_programs and self.visible_programs:
+            program_id = self.visible_programs[0]
+        self.selected_program_var.set(program_id)
+        self._update_program_dependent_ui()
+        self.save_preferences()
+
+    def _build_instruction_text(self):
+        selected_program = self._get_selected_program_id()
+        selected_label = self._get_program_label(selected_program)
+        effective_hotkey, hotkey_error = self._resolve_effective_hotkey(selected_program)
+        shortcut_hint = _format_hotkey_label(effective_hotkey) if effective_hotkey else f"Not configured ({hotkey_error})"
+        return (
+            "Instructions:\n"
+            "1. Auto Mode:\n"
+            "   - Set the watch folder (where scores are saved), click 'Start Watching'\n"
+            "   - In your notation/DAW app: select content to export/save\n"
+            f"   - Click 'Trigger Save/Export in {selected_label}' (or use the app's own save/export path)\n"
+            "   - Save in the watch folder\n"
+            f"   - Shortcut reminder for {selected_label}: {shortcut_hint}\n"
+            "\n"
+            "Note: Watched-file AI opening remains MuseScore-only."
+        )
+
+    def _update_program_dependent_ui(self):
+        selected_program = self._get_selected_program_id()
+        selected_label = self._get_program_label(selected_program)
+        self.save_selection_button.config(text=f"Trigger Save/Export in {selected_label}")
+        self.instructions_label.config(text=self._build_instruction_text())
+
+    def _reset_custom_hotkey(self, program_id):
+        self.custom_hotkey_vars[program_id].set("")
+
+    def _save_settings(self):
+        visible = [pid for pid in PROGRAM_ORDER if self.visible_program_vars[pid].get()]
+        if not visible:
+            for pid in PROGRAM_ORDER:
+                self.visible_program_vars[pid].set(pid in self.visible_programs)
+            messagebox.showerror("Invalid Settings", "At least one program must remain visible.")
+            return
+
+        platform_key = _current_platform_key()
+        normalized_custom = {}
+        for pid in PROGRAM_ORDER:
+            raw_hotkey = (self.custom_hotkey_vars[pid].get() or "").strip()
+            if not raw_hotkey:
+                normalized_custom[pid] = ""
+                continue
+            normalized, error = _normalize_hotkey_value(raw_hotkey, platform_key)
+            if error:
+                messagebox.showerror(
+                    "Invalid Hotkey",
+                    f"{self._get_program_label(pid)} hotkey is invalid:\n{error}",
+                )
+                return
+            normalized_custom[pid] = normalized
+
+        self.visible_programs = visible
+        self.custom_hotkeys = normalized_custom
+
+        selected_program = self._get_selected_program_id()
+        if selected_program not in self.visible_programs:
+            self.selected_program_var.set(self.visible_programs[0])
+
+        for pid in PROGRAM_ORDER:
+            self.custom_hotkey_vars[pid].set(self.custom_hotkeys.get(pid, ""))
+
+        self._refresh_program_dropdown()
+        self._update_program_dependent_ui()
+        self.save_preferences()
+        self.log("Settings saved.")
 
     def browse_watch_folder(self):
         folder = filedialog.askdirectory(title="Select Folder to Watch")
@@ -764,7 +1153,7 @@ Instructions:
     def _should_accept_new_file(self, now_monotonic):
         with self._watch_gate_lock:
             last = self._last_accepted_watch_event_ts
-            if last is not None and now_monotonic - last < 60.0:
+            if last is not None and now_monotonic - last < 5.0:
                 return False
             self._last_accepted_watch_event_ts = now_monotonic
             return True
@@ -1114,6 +1503,227 @@ Instructions:
                     self.log(f"Error watching folder: {str(e)}\n")
                 time.sleep(2)
 
+    def _find_program_window_macos(self, program_id):
+        profile = PROGRAM_PROFILES[program_id]
+
+        for process_name in profile["mac_process_names"]:
+            script = f"""
+            tell application "System Events"
+                try
+                    set targetProcess to first process whose name is "{process_name}"
+                    return name of targetProcess
+                on error
+                    return ""
+                end try
+            end tell
+            """
+            success, output, _ = run_applescript(script)
+            if success and output and output.strip():
+                return True, output.strip(), ""
+
+        if PSUTIL_AVAILABLE:
+            try:
+                for proc in psutil.process_iter(["name"]):
+                    try:
+                        proc_name = proc.info.get("name") or ""
+                        proc_lower = proc_name.lower()
+                        if any(keyword in proc_lower for keyword in profile["mac_contains"]):
+                            return True, proc_name, ""
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except Exception:
+                pass
+
+        return False, "", f"{profile['label']} process not found"
+
+    def _activate_program_window_macos(self, program_id):
+        profile = PROGRAM_PROFILES[program_id]
+
+        for app_name in profile["mac_app_names"]:
+            script = f"""
+            tell application "{app_name}"
+                activate
+            end tell
+            """
+            success, output, error = run_applescript(script)
+            if success:
+                return True, output, error
+
+        for process_name in profile["mac_process_names"]:
+            script = f"""
+            tell application "System Events"
+                try
+                    set targetProcess to first process whose name is "{process_name}"
+                    set frontmost of targetProcess to true
+                    return true
+                on error
+                    return false
+                end try
+            end tell
+            """
+            success, output, error = run_applescript(script)
+            if success and output.strip().lower() == "true":
+                return True, output, error
+
+        return False, "", f"Could not activate {profile['label']}"
+
+    def _send_hotkey_macos(self, normalized_hotkey):
+        modifiers, key = _split_normalized_hotkey(normalized_hotkey)
+        key_to_send = " " if key == "space" else key
+        modifier_tokens = []
+        for mod in modifiers:
+            if mod == "cmd":
+                modifier_tokens.append("command down")
+            elif mod == "ctrl":
+                modifier_tokens.append("control down")
+            elif mod == "alt":
+                modifier_tokens.append("option down")
+            elif mod == "shift":
+                modifier_tokens.append("shift down")
+
+        if modifier_tokens:
+            using_clause = " using {" + ", ".join(modifier_tokens) + "}"
+        else:
+            using_clause = ""
+
+        script = f"""
+        tell application "System Events"
+            keystroke "{key_to_send}"{using_clause}
+            return true
+        end tell
+        """
+        success, output, error = run_applescript(script)
+        if success and output.strip().lower() == "true":
+            return True, output, error
+        return False, output, error or "Could not send macOS shortcut"
+
+    def _find_program_window_windows(self, program_id):
+        profile = PROGRAM_PROFILES[program_id]
+        app = None
+        methods_tried = []
+
+        if program_id == "musescore":
+            for backend in ["uia", "win32", None]:
+                try:
+                    if backend:
+                        app = Application(backend=backend).connect(path="MuseScore4.exe")
+                        methods_tried.append(f"{backend} by process")
+                    else:
+                        app = Application().connect(path="MuseScore4.exe")
+                        methods_tried.append("default by process")
+                    return app, methods_tried
+                except Exception as e:
+                    methods_tried.append(f"{backend or 'default'} process failed: {str(e)[:50]}")
+
+        title_keywords = profile["windows_title_keywords"]
+        if title_keywords:
+            pattern = title_keywords[0]
+            try:
+                app = Application(backend="uia").connect(title_re=f".*{pattern}.*")
+                methods_tried.append("UIA by title regex")
+                return app, methods_tried
+            except Exception as e:
+                methods_tried.append(f"title regex failed: {str(e)[:50]}")
+
+        if PSUTIL_AVAILABLE:
+            try:
+                for proc in psutil.process_iter(["pid", "name", "exe"]):
+                    try:
+                        proc_name = (proc.info.get("name") or "").lower()
+                        proc_exe = (proc.info.get("exe") or "").lower()
+                        if any(keyword in proc_name or keyword in proc_exe for keyword in profile["windows_process_keywords"]):
+                            app = Application(backend="uia").connect(process=proc.info["pid"])
+                            methods_tried.append(f"process enumeration: {proc.info.get('name')}")
+                            return app, methods_tried
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        continue
+            except Exception as e:
+                methods_tried.append(f"process search failed: {str(e)[:50]}")
+
+        if WIN32_AVAILABLE:
+            try:
+                def enum_handler(hwnd, ctx):
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    window_text = (win32gui.GetWindowText(hwnd) or "").lower()
+                    if any(keyword in window_text for keyword in title_keywords):
+                        ctx.append(hwnd)
+
+                handles = []
+                win32gui.EnumWindows(enum_handler, handles)
+                if handles:
+                    app = Application().connect(handle=handles[0])
+                    methods_tried.append("Windows API by title")
+                    return app, methods_tried
+            except Exception as e:
+                methods_tried.append(f"Windows API failed: {str(e)[:50]}")
+
+        return None, methods_tried
+
+    def _send_hotkey_windows(self, main_window, normalized_hotkey):
+        shortcut_sent = False
+        last_error = None
+        pywinauto_sequence = _hotkey_to_windows_pywinauto(normalized_hotkey)
+        modifiers, key = _split_normalized_hotkey(normalized_hotkey)
+        pyautogui_keys = []
+        for mod in modifiers:
+            if mod == "ctrl":
+                pyautogui_keys.append("ctrl")
+            elif mod == "alt":
+                pyautogui_keys.append("alt")
+            elif mod == "shift":
+                pyautogui_keys.append("shift")
+        pyautogui_keys.append("space" if key == "space" else key)
+
+        try:
+            main_window.set_focus()
+            time.sleep(0.2)
+            main_window.type_keys(pywinauto_sequence, with_spaces=False, pause=0.1)
+            shortcut_sent = True
+            self.log("OK: Sent shortcut using pywinauto type_keys()")
+        except Exception as e:
+            last_error = str(e)
+            self.log(f"  pywinauto type_keys() failed: {str(e)[:60]}")
+
+        if not shortcut_sent:
+            try:
+                main_window.set_focus()
+                time.sleep(0.2)
+                main_window.send_keystrokes(pywinauto_sequence)
+                shortcut_sent = True
+                self.log("OK: Sent shortcut using pywinauto send_keystrokes()")
+            except Exception as e:
+                last_error = str(e)
+                self.log(f"  pywinauto send_keystrokes() failed: {str(e)[:60]}")
+
+        if not shortcut_sent:
+            try:
+                main_window.set_focus()
+                time.sleep(0.2)
+                pyautogui.hotkey(*pyautogui_keys)
+                shortcut_sent = True
+                self.log("OK: Sent shortcut using pyautogui hotkey()")
+            except Exception as e:
+                last_error = str(e)
+                self.log(f"  pyautogui hotkey() failed: {str(e)[:60]}")
+
+        if not shortcut_sent:
+            try:
+                main_window.set_focus()
+                time.sleep(0.2)
+                for mod in pyautogui_keys[:-1]:
+                    pyautogui.keyDown(mod)
+                pyautogui.press(pyautogui_keys[-1])
+                for mod in reversed(pyautogui_keys[:-1]):
+                    pyautogui.keyUp(mod)
+                shortcut_sent = True
+                self.log("OK: Sent shortcut using pyautogui keyDown/Up()")
+            except Exception as e:
+                last_error = str(e)
+                self.log(f"  pyautogui keyDown/Up() failed: {str(e)[:60]}")
+
+        return shortcut_sent, last_error
+
     def trigger_save_selection(self):
         if IS_WINDOWS:
             if not PYWINAUTO_AVAILABLE or not PYAUTOGUI_AVAILABLE:
@@ -1139,115 +1749,62 @@ Instructions:
 
     def _trigger_save_selection_macos(self):
         try:
-            self.log("Attempting to trigger Save Selection in MuseScore...")
-            self.log("Step 1: Finding MuseScore window...")
+            program_id = self._get_selected_program_id()
+            program_label = self._get_program_label(program_id)
+            effective_hotkey, hotkey_error = self._resolve_effective_hotkey(program_id)
+            if not effective_hotkey:
+                self.log(f"Error: {hotkey_error}")
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror("Shortcut Not Configured", hotkey_error),
+                )
+                return
 
-            success, output, error = find_musescore_window_macos()
+            self.log(f"Attempting to trigger save/export in {program_label}...")
+            self.log(f"Step 1: Finding {program_label} window...")
+            success, output, error = self._find_program_window_macos(program_id)
             if not success:
-                self.log("Error: Could not find MuseScore window")
+                self.log(f"Error: Could not find {program_label} window")
                 self.log(f"Error: {error}")
-
-                self.log("\nDebug: Searching for MuseScore processes...")
-                found_processes = []
-
-                if PSUTIL_AVAILABLE:
-                    try:
-                        for proc in psutil.process_iter(["pid", "name"]):
-                            try:
-                                proc_name = proc.info.get("name") or ""
-                                proc_lower = proc_name.lower()
-                                if proc_lower == "mscore" or "musescore" in proc_lower:
-                                    found_processes.append(proc_name)
-                                    self.log(
-                                        f"  Found process: {proc_name} (PID: {proc.info.get('pid')})"
-                                    )
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                continue
-                    except Exception as e:
-                        self.log(f"  Could not list processes: {e}")
-
-                list_script = """
-                tell application "System Events"
-                    set processList to name of every process
-                    set resultList to {}
-                    repeat with procName in processList
-                        if procName contains "Muse" or procName contains "muse" or procName contains "Score" or procName contains "score" then
-                            set end of resultList to procName
-                        end if
-                    end repeat
-                    return resultList
-                end tell
-                """
-                list_success, list_output, list_error = run_applescript(list_script)
-                if list_success and list_output:
-                    self.log(f"  AppleScript found processes: {list_output}")
-
-                if not found_processes and not list_output:
-                    self.log("  No MuseScore-related processes found.")
-                    self.log("\nTroubleshooting tips:")
-                    self.log("  1. Make sure MuseScore 4 is running with a score open")
-                    self.log("  2. Check System Settings > Privacy & Security > Accessibility")
-                    self.log("     - Ensure Terminal/Python has accessibility permissions")
-                    self.log("  3. Try restarting MuseScore 4")
-
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
-                        "MuseScore Not Found",
-                        "Could not find a running MuseScore window.\n\n"
-                        "Please ensure MuseScore 4 is open with a score loaded and try again.\n\n"
-                        "Check the output log for debugging information.\n\n"
-                        "Note: You may need to grant accessibility permissions to Terminal/Python\n"
-                        "in System Settings > Privacy & Security > Accessibility.",
+                        f"{program_label} Not Found",
+                        f"Could not find a running {program_label} window.\n\n"
+                        f"Please ensure {program_label} is open and try again.\n\n"
+                        "Check the output log for details.",
                     ),
                 )
                 return
 
-            self.log(f"OK: Found MuseScore: {output}")
-
-            self.log("Step 2: Activating MuseScore window...")
-            success, output, error = activate_musescore_window_macos()
-            if success:
-                self.log("OK: Activated MuseScore window")
+            self.log(f"OK: Found {program_label}: {output}")
+            self.log(f"Step 2: Activating {program_label} window...")
+            activated, _, activate_error = self._activate_program_window_macos(program_id)
+            if activated:
+                self.log(f"OK: Activated {program_label} window")
             else:
-                self.log(f"Warning: Warning: Could not activate window: {error}")
+                self.log(f"Warning: Could not activate {program_label}: {activate_error}")
 
             time.sleep(0.5)
-
-            self.log(f"Step 3: Sending keyboard shortcut {SAVE_SELECTION_SHORTCUT_LABEL}...")
-            success, output, error = send_shortcut_macos()
-            if success:
+            shortcut_label = _format_hotkey_label(effective_hotkey)
+            self.log(f"Step 3: Sending keyboard shortcut {shortcut_label}...")
+            sent, _, send_error = self._send_hotkey_macos(effective_hotkey)
+            if sent:
                 self.log("OK: Keyboard shortcut sent successfully!")
                 time.sleep(0.5)
-                self.log("Please complete the save dialog in MuseScore...")
-                self.root.after(
-                    0,
-                    lambda: messagebox.showinfo(
-                        "Save Selection Triggered",
-                        "Save Selection dialog should now be open in MuseScore.\n\n"
-                        "Please:\n"
-                        "1. Choose the save location (preferably the watch folder)\n"
-                        "2. Enter a filename\n"
-                        "3. Click Save\n\n"
-                        "If watching is enabled, the file will be processed automatically.\n\n"
-                        "If the dialog didn't open, check the output log for details.",
-                    ),
-                )
+                self.log(f"Please complete the save/export dialog in {program_label}...")
             else:
-                self.log(f"Error: Failed to send keyboard shortcut: {error}")
+                self.log(f"Error: Failed to send keyboard shortcut: {send_error}")
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
                         "Error",
-                        "Could not send keyboard shortcut to MuseScore.\n\n"
-                        "Please check the output log for details.\n\n"
-                        "You can still use File > Save Selection "
-                        f"(or {SAVE_SELECTION_SHORTCUT_LABEL}).",
+                        f"Could not send keyboard shortcut {shortcut_label} to {program_label}.\n\n"
+                        "Please check the output log for details.",
                     ),
                 )
-
         except Exception as e:
-            error_msg = f"Error triggering Save Selection: {str(e)}"
+            error_msg = f"Error triggering save/export: {str(e)}"
             self.log(f"Error: {error_msg}")
             import traceback
 
@@ -1259,129 +1816,31 @@ Instructions:
         main_window = None
 
         try:
-            self.log("Attempting to trigger Save Selection in MuseScore...")
-            self.log("Step 1: Finding MuseScore window...")
+            program_id = self._get_selected_program_id()
+            program_label = self._get_program_label(program_id)
+            effective_hotkey, hotkey_error = self._resolve_effective_hotkey(program_id)
+            if not effective_hotkey:
+                self.log(f"Error: {hotkey_error}")
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror("Shortcut Not Configured", hotkey_error),
+                )
+                return
 
-            found = False
-            methods_tried = []
-
-            try:
-                app = Application(backend="uia").connect(path="MuseScore4.exe")
-                methods_tried.append("UIA backend by process")
-                found = True
-                self.log("OK: Found MuseScore process (UIA backend by process name)")
-            except Exception as e:
-                methods_tried.append(f"UIA by process failed: {str(e)[:50]}")
-
-            if not found:
-                try:
-                    app = Application(backend="win32").connect(path="MuseScore4.exe")
-                    methods_tried.append("Win32 backend by process")
-                    found = True
-                    self.log("OK: Found MuseScore process (Win32 backend by process name)")
-                except Exception as e:
-                    methods_tried.append(f"Win32 by process failed: {str(e)[:50]}")
-
-            if not found:
-                try:
-                    app = Application().connect(path="MuseScore4.exe")
-                    methods_tried.append("Default backend by process")
-                    found = True
-                    self.log("OK: Found MuseScore process (default backend by process name)")
-                except Exception as e:
-                    methods_tried.append(f"Default by process failed: {str(e)[:50]}")
-
-            if not found:
-                try:
-                    try:
-                        app = Application(backend="uia").connect(title_re=".*MuseScore 4.*")
-                        found = True
-                        self.log("OK: Found MuseScore window (UIA backend by 'MuseScore 4' title)")
-                    except Exception:
-                        if PSUTIL_AVAILABLE:
-                            for proc in psutil.process_iter(["pid", "name"]):
-                                try:
-                                    proc_name = proc.info["name"] or ""
-                                    if "MuseScore4.exe" in proc_name or (
-                                        "MuseScore" in proc_name and "Pitch" not in proc_name
-                                    ):
-                                        app = Application(backend="uia").connect(process=proc.info["pid"])
-                                        found = True
-                                        self.log(f"OK: Found MuseScore by process enumeration: {proc_name}")
-                                        break
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    continue
-                except Exception as e:
-                    methods_tried.append(f"UIA by filtered title failed: {str(e)[:50]}")
-
-            if not found and WIN32_AVAILABLE:
-                try:
-                    def enum_handler(hwnd, ctx):
-                        if win32gui.IsWindowVisible(hwnd):
-                            window_text = win32gui.GetWindowText(hwnd)
-                            if "MuseScore" in window_text and "Pitch Extractor" not in window_text:
-                                try:
-                                    _, pid = win32gui.GetWindowThreadProcessId(hwnd)
-                                    if PSUTIL_AVAILABLE:
-                                        try:
-                                            proc = psutil.Process(pid)
-                                            proc_name = proc.name()
-                                            if "MuseScore" in proc_name and "Pitch" not in proc_name:
-                                                ctx.append((hwnd, window_text, proc_name))
-                                        except Exception:
-                                            if "MuseScore 4" in window_text or window_text.startswith("MuseScore"):
-                                                ctx.append((hwnd, window_text, "unknown"))
-                                    else:
-                                        if "MuseScore 4" in window_text or window_text.startswith("MuseScore"):
-                                            ctx.append((hwnd, window_text, "unknown"))
-                                except Exception:
-                                    pass
-
-                    windows = []
-                    win32gui.EnumWindows(enum_handler, windows)
-
-                    if windows:
-                        hwnd, window_text, proc_name = windows[0]
-                        try:
-                            app = Application().connect(handle=hwnd)
-                            found = True
-                            self.log(
-                                f"OK: Found MuseScore window using Windows API: '{window_text}' (process: {proc_name})"
-                            )
-                        except Exception:
-                            pass
-                except Exception as e:
-                    methods_tried.append(f"Windows API failed: {str(e)[:50]}")
-
-            if not found and PSUTIL_AVAILABLE:
-                try:
-                    for proc in psutil.process_iter(["pid", "name", "exe"]):
-                        try:
-                            proc_name = proc.info["name"] or ""
-                            proc_exe = proc.info["exe"] or ""
-                            if "MuseScore4.exe" in proc_exe or (
-                                proc_name and "MuseScore" in proc_name and "4" in proc_name and "Pitch" not in proc_name
-                            ):
-                                app = Application(backend="uia").connect(process=proc.info["pid"])
-                                found = True
-                                self.log(f"OK: Found MuseScore by process search: {proc_name}")
-                                break
-                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                            continue
-                except Exception as e:
-                    methods_tried.append(f"Process search failed: {str(e)[:50]}")
-
-            if not found:
-                self.log("Error: Could not find MuseScore window")
+            self.log(f"Attempting to trigger save/export in {program_label}...")
+            self.log(f"Step 1: Finding {program_label} window...")
+            app, methods_tried = self._find_program_window_windows(program_id)
+            if app is None:
+                self.log(f"Error: Could not find {program_label} window")
                 self.log("Methods tried:")
                 for method in methods_tried:
                     self.log(f"  - {method}")
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
-                        "MuseScore Not Found",
-                        "Could not find a running MuseScore window.\n\n"
-                        "Please ensure MuseScore 4 is open with a score loaded and try again.\n\n"
+                        f"{program_label} Not Found",
+                        f"Could not find a running {program_label} window.\n\n"
+                        f"Please ensure {program_label} is open and try again.\n\n"
                         "Check the output log for details.",
                     ),
                 )
@@ -1393,23 +1852,22 @@ Instructions:
                 window_title = main_window.window_text()
                 self.log(f"OK: Found window: '{window_title}'")
             except Exception as e:
-                self.log(f"Error: Error accessing window: {str(e)}")
+                self.log(f"Error: Could not access {program_label} window: {str(e)}")
                 self.root.after(
                     0,
-                    lambda: messagebox.showerror("Error", f"Could not access MuseScore window: {str(e)}"),
+                    lambda: messagebox.showerror("Error", f"Could not access {program_label} window: {str(e)}"),
                 )
                 return
 
-            self.log("Step 3: Activating MuseScore window...")
+            self.log(f"Step 3: Activating {program_label} window...")
             activated = False
-
             try:
                 main_window.set_focus()
                 time.sleep(0.5)
                 activated = True
                 self.log("OK: Activated using set_focus()")
             except Exception as e:
-                self.log(f"  set_focus() failed: {str(e)[:50]}")
+                self.log(f"  set_focus() failed: {str(e)[:60]}")
 
             if not activated:
                 try:
@@ -1418,17 +1876,7 @@ Instructions:
                     activated = True
                     self.log("OK: Activated using set_foreground()")
                 except Exception as e:
-                    self.log(f"  set_foreground() failed: {str(e)[:50]}")
-
-            if not activated:
-                try:
-                    main_window.restore()
-                    main_window.set_focus()
-                    time.sleep(0.5)
-                    activated = True
-                    self.log("OK: Activated using restore() + set_focus()")
-                except Exception as e:
-                    self.log(f"  restore() + set_focus() failed: {str(e)[:50]}")
+                    self.log(f"  set_foreground() failed: {str(e)[:60]}")
 
             if not activated and WIN32_AVAILABLE:
                 try:
@@ -1440,78 +1888,32 @@ Instructions:
                     activated = True
                     self.log("OK: Activated using Windows API")
                 except Exception as e:
-                    self.log(f"  Windows API activation failed: {str(e)[:50]}")
+                    self.log(f"  Windows API activation failed: {str(e)[:60]}")
 
             if not activated:
-                self.log("Warning: Warning: Could not activate window, but continuing anyway...")
+                self.log("Warning: Could not activate window, continuing anyway...")
 
             time.sleep(0.5)
-
-            self.log(f"Step 4: Sending keyboard shortcut {SAVE_SELECTION_SHORTCUT_LABEL}...")
-            shortcut_sent = False
-
-            try:
-                main_window.set_focus()
-                time.sleep(0.2)
-                main_window.type_keys("^+s", with_spaces=False, pause=0.1)
-                shortcut_sent = True
-                self.log("OK: Sent shortcut using pywinauto type_keys()")
-            except Exception as e:
-                self.log(f"  pywinauto type_keys() failed: {str(e)[:50]}")
-
-            if not shortcut_sent:
-                try:
-                    main_window.set_focus()
-                    time.sleep(0.2)
-                    main_window.send_keystrokes("^+s")
-                    shortcut_sent = True
-                    self.log("OK: Sent shortcut using pywinauto send_keystrokes()")
-                except Exception as e:
-                    self.log(f"  pywinauto send_keystrokes() failed: {str(e)[:50]}")
-
-            if not shortcut_sent:
-                try:
-                    main_window.set_focus()
-                    time.sleep(0.2)
-                    pyautogui.hotkey("ctrl", "shift", "s")
-                    shortcut_sent = True
-                    self.log("OK: Sent shortcut using pyautogui hotkey()")
-                except Exception as e:
-                    self.log(f"  pyautogui hotkey() failed: {str(e)[:50]}")
-
-            if not shortcut_sent:
-                try:
-                    main_window.set_focus()
-                    time.sleep(0.2)
-                    pyautogui.keyDown("ctrl")
-                    pyautogui.keyDown("shift")
-                    pyautogui.press("s")
-                    pyautogui.keyUp("shift")
-                    pyautogui.keyUp("ctrl")
-                    shortcut_sent = True
-                    self.log("OK: Sent shortcut using pyautogui keyDown/Up()")
-                except Exception as e:
-                    self.log(f"  pyautogui keyDown/Up() failed: {str(e)[:50]}")
-
-            if shortcut_sent:
+            shortcut_label = _format_hotkey_label(effective_hotkey)
+            self.log(f"Step 4: Sending keyboard shortcut {shortcut_label}...")
+            sent, send_error = self._send_hotkey_windows(main_window, effective_hotkey)
+            if sent:
                 self.log("OK: Keyboard shortcut sent successfully!")
                 time.sleep(0.5)
-                self.log("Please complete the save dialog in MuseScore...")
+                self.log(f"Please complete the save/export dialog in {program_label}...")
             else:
-                self.log("Error: Failed to send keyboard shortcut with all methods")
+                self.log(f"Error: Failed to send keyboard shortcut with all methods ({send_error})")
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
                         "Error",
-                        "Could not send keyboard shortcut to MuseScore.\n\n"
-                        "Please check the output log for details.\n\n"
-                        "You can still use File > Save Selection "
-                        f"(or {SAVE_SELECTION_SHORTCUT_LABEL}).",
+                        f"Could not send keyboard shortcut {shortcut_label} to {program_label}.\n\n"
+                        "Please check the output log for details.",
                     ),
                 )
 
         except Exception as e:
-            error_msg = f"Error triggering Save Selection: {str(e)}"
+            error_msg = f"Error triggering save/export: {str(e)}"
             self.log(f"Error: {error_msg}")
             import traceback
 
@@ -1537,7 +1939,7 @@ Instructions:
                     mtime = self.hotkey_request_path.stat().st_mtime
                     if mtime > self._last_hotkey_request:
                         self._last_hotkey_request = mtime
-                        self.log("Global hotkey request detected (background listener).")
+                        self.log("Global hotkey request detected (background listener, triggering save/export).")
                         self.root.after(0, self.trigger_save_selection)
                 time.sleep(0.6)
             except Exception:
@@ -1575,7 +1977,7 @@ Instructions:
                 thread = threading.Thread(target=run_pynput_listener, daemon=True)
                 thread.start()
                 self.log(f"OK: Global hotkey registered: {_format_hotkey_label(hotkey)}")
-                self.log("  You can now press the hotkey from anywhere to trigger Save Selection!")
+                self.log("  You can now press the hotkey from anywhere to trigger save/export automation!")
             except Exception as e:
                 self.log(f"Error: Failed to register global hotkey: {str(e)}")
                 messagebox.showwarning(
@@ -1592,7 +1994,7 @@ Instructions:
         try:
             keyboard.add_hotkey(hotkey, self.trigger_save_selection, suppress=False)
             self.log(f"OK: Global hotkey registered: {_format_hotkey_label(hotkey)}")
-            self.log("  You can now press the hotkey from anywhere to trigger Save Selection!")
+            self.log("  You can now press the hotkey from anywhere to trigger save/export automation!")
         except Exception as e:
             self.log(f"Error: Failed to register global hotkey: {str(e)}")
             messagebox.showwarning(

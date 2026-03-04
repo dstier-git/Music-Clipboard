@@ -38,6 +38,11 @@ The core idea: capture the exact musical fragment you want, then let AI help tur
 2. **Manual Mode**: Browse for a MuseScore file, then click **Extract**; output appears in the GUI and is saved under `txts/` in the repository root.
 3. **Auto Mode**:
    - Set the watch folder (default `Documents/MuseScore4/Scores`) and click **Start Watching**.
+   - Choose target program from the new **Target Program** dropdown (`MuseScore` or `Logic Pro`).
+   - Use the **Settings** tab to:
+     - Show/hide programs in the dropdown.
+     - Set per-program custom save/export hotkeys.
+     - Leave custom hotkey blank to use the platform default.
    - For each accepted new `.mscx`/`.mscz` file, the app now:
      - Runs the extraction workflow.
      - Prompts for an AI edit instruction.
@@ -46,12 +51,13 @@ The core idea: capture the exact musical fragment you want, then let AI help tur
    - MIDI watch support: new `.mid`/`.midi` files are also accepted and opened in MuseScore for the AI flow.
      - MIDI inputs skip extraction and only run prompt -> MuseScore open -> Claude send.
    - In MuseScore, select measures and:
-     - Click **Trigger Save Selection in MuseScore** in the app (requires `pyautogui`).
+     - Click **Trigger Save/Export in <selected program>** in the app (requires automation deps).
      - Or save selection manually via **File > Save Selection** (`Shift+Cmd+S`).
    - MuseScore saves the selection to the watched folder and the app detects it automatically as a clipboard-ready fragment.
    - Rate limit: only one new score file is processed per 60-second window. Additional score files in that window are ignored with no action.
    - Claude requirement: Claude Desktop must already be running before MuseScore is opened for AI automation.
    - If opening MuseScore 4 fails, the app shows an error and cancels Claude sending for that file.
+   - Note: watched-file AI opening remains MuseScore-only, even if Logic Pro is selected in the dropdown.
 4. macOS automation relies on AppleScript; grant accessibility permissions to Terminal/Python under **System Preferences > Security & Privacy > Privacy > Accessibility** if automation buttons stay disabled.
 
 ### Windows (`WIN/`)
@@ -63,11 +69,13 @@ The core idea: capture the exact musical fragment you want, then let AI help tur
 2. **Manual Mode**: Browse for a score, optionally enter a measure range, then click **Extract**; output files are saved next to the input file by default.
 3. **Auto Mode**:
    - Choose a watch folder (default `Documents/MuseScore4/Scores`) and start watching.
-   - In MuseScore, select measures and:
+   - Choose target program from the main dropdown (`MuseScore` or `Logic Pro`).
+   - In the selected program, perform your save/export flow and:
      - Hit the global hotkey `Ctrl+Alt+S` (after starting `hotkey_listener.py` or `run_hotkey_listener.bat`) to trigger Save Selection even when MuseScore runs in the background.
-     - Or click **Trigger Save Selection** inside the GUI.
+     - Or click **Trigger Save/Export in <selected program>** inside the GUI.
      - Or use MuseScore's native **File > Save Selection** (`Ctrl+Shift+S`).
    - Saved selections go into the watched folder and the app processes them automatically for clipboard + AI refinement flow.
+   - Logic Pro on Windows has no default app hotkey in this tool; set a custom one in **Settings** before triggering.
 4. To always listen for hotkeys, run `python hotkey_listener.py` or `run_hotkey_listener.bat` (add the batch file to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` for persistence). The listener writes requests to `musescore_hotkey_request.txt`, so the GUI can react even when it launches after a keypress.
 
 ## Shared command-line scripts
@@ -105,8 +113,10 @@ G4	M1:2.00	(tick: 480)
 - **Import errors**: Ensure the `app/` directory is present and the platform wrapper scripts (`MAC/` or `WIN/`) have not been moved out of the repository.
 - **No notes extracted**: Confirm the file is a valid `.mscx`/`.mscz` MuseScore file.
 - **Watch folder not detecting files**: Verify MuseScore saves selections to the configured folder.
-- **A detected file appears to be ignored**: In macOS AI auto mode, only one file is accepted every 60 seconds; later files in that window are ignored silently.
+- **A detected file appears to be ignored**: In macOS AI auto mode, only one file is accepted every 5 seconds; later files in that window are ignored silently.
 - **MIDI file behavior**: `.mid`/`.midi` files are opened in MuseScore for AI flow, but extraction is skipped for MIDI inputs.
+- **Program dropdown missing entries**: Open **Settings** and ensure the program is enabled in "Show".
+- **Logic Pro trigger on Windows does nothing**: Configure a custom Logic Pro shortcut in **Settings** (there is no Windows default).
 - **"Claude Not Running"**: Open Claude Desktop first; the app will not auto-launch Claude.
 - **"MuseScore Open Failed"**: Ensure MuseScore 4 is installed as `MuseScore 4` and can be opened manually. Claude sending is canceled when this occurs.
 - **Automation buttons stay disabled**: Install the optional dependencies (`pyautogui`, `pywinauto`, `keyboard`) and grant accessibility permissions (macOS).
