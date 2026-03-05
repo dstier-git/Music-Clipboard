@@ -98,6 +98,7 @@ PROGRAM_PROFILES = {
 }
 
 PROGRAM_ORDER = ["musescore", "logic_pro"]
+PROCESSING_MODES = ["AI Editing", "Simple Extraction"]
 HOTKEY_MODIFIER_ORDER = ["cmd", "ctrl", "alt", "shift"]
 HOTKEY_MODIFIER_ALIASES = {
     "cmd": "cmd",
@@ -515,6 +516,7 @@ class MuseScoreExtractorApp:
         self.seen_output_type_files = set()
         self._clear_confirm_queue = queue.Queue()
         self.output_format = tk.StringVar(value="Text")
+        self.processing_mode = tk.StringVar(value="AI Editing")
         self.last_extracted_file = None
         self.delete_previous_var = tk.BooleanVar(value=True)
         self.preferences = self.load_preferences()
@@ -546,6 +548,7 @@ class MuseScoreExtractorApp:
             "selected_program": "musescore",
             "visible_programs": list(PROGRAM_ORDER),
             "custom_hotkeys": {},
+            "processing_mode": "AI Editing",
         }
 
         if not CONFIG_FILE.exists():
@@ -652,6 +655,7 @@ class MuseScoreExtractorApp:
             "selected_program": selected_program,
             "visible_programs": list(self.visible_programs),
             "custom_hotkeys": dict(self.custom_hotkeys),
+            "processing_mode": self.processing_mode.get(),
         }
         try:
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -677,6 +681,10 @@ class MuseScoreExtractorApp:
         elif selected_program not in PROGRAM_PROFILES:
             selected_program = "musescore"
         self.selected_program_var.set(selected_program)
+        saved_mode = self.preferences.get("processing_mode", "AI Editing")
+        if saved_mode not in PROCESSING_MODES:
+            saved_mode = "AI Editing"
+        self.processing_mode.set(saved_mode)
         self._refresh_program_dropdown()
         self._update_program_dependent_ui()
 
@@ -750,6 +758,16 @@ class MuseScoreExtractorApp:
         )
         format_dropdown.current(0)
         format_dropdown.grid(row=0, column=1, padx=5)
+        ttk.Label(format_frame, text="Mode:").grid(row=0, column=2, padx=(20, 5))
+        mode_dropdown = ttk.Combobox(
+            format_frame,
+            textvariable=self.processing_mode,
+            values=PROCESSING_MODES,
+            state="readonly",
+            width=18,
+        )
+        mode_dropdown.grid(row=0, column=3, padx=5)
+        mode_dropdown.bind("<<ComboboxSelected>>", self._on_processing_mode_changed)
 
         program_frame = ttk.Frame(watch_frame)
         program_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
@@ -928,11 +946,21 @@ class MuseScoreExtractorApp:
         self._update_program_dependent_ui()
         self.save_preferences()
 
+    def _on_processing_mode_changed(self, _event=None):
+        self._update_program_dependent_ui()
+        self.save_preferences()
+
     def _build_instruction_text(self):
         selected_program = self._get_selected_program_id()
         selected_label = self._get_program_label(selected_program)
         effective_hotkey, hotkey_error = self._resolve_effective_hotkey(selected_program)
         shortcut_hint = _format_hotkey_label(effective_hotkey) if effective_hotkey else f"Not configured ({hotkey_error})"
+        mode = self.processing_mode.get() if hasattr(self, "processing_mode") else "AI Editing"
+        mode_hint = (
+            "Mode: AI Editing (opens MuseScore + sends prompt to Claude + waits for final MIDI export)"
+            if mode == "AI Editing"
+            else "Mode: Simple Extraction (no Claude automation; only extraction/clipboard flow)"
+        )
         return (
             "Instructions:\n"
             "1. Auto Mode:\n"
@@ -942,6 +970,7 @@ class MuseScoreExtractorApp:
             "   - Save in the watch folder\n"
             f"   - Shortcut reminder for {selected_label}: {shortcut_hint}\n"
             "\n"
+            f"{mode_hint}\n"
             "Note: Watched-file AI opening remains MuseScore-only."
         )
 
@@ -1416,6 +1445,10 @@ class MuseScoreExtractorApp:
             self.extract_file(file_path)
         elif extension in (".mid", ".midi"):
             self.log(f"Skipping extraction for MIDI input: {os.path.basename(file_path)}")
+
+        if self.processing_mode.get() == "Simple Extraction":
+            self.log(f"Simple Extraction mode: skipping Claude automation for {os.path.basename(file_path)}")
+            return
 
         if not IS_MACOS:
             return
