@@ -98,7 +98,9 @@ PROGRAM_PROFILES = {
 }
 
 PROGRAM_ORDER = ["musescore", "logic_pro"]
-PROCESSING_MODES = ["AI Editing", "Simple Extraction"]
+TAB_CLIPBOARD = "clipboard"
+TAB_AI_EDITING = "ai_editing"
+TAB_SETTINGS = "settings"
 HOTKEY_MODIFIER_ORDER = ["cmd", "ctrl", "alt", "shift"]
 HOTKEY_MODIFIER_ALIASES = {
     "cmd": "cmd",
@@ -516,9 +518,10 @@ class MuseScoreExtractorApp:
         self.seen_output_type_files = set()
         self._clear_confirm_queue = queue.Queue()
         self.output_format = tk.StringVar(value="Text")
-        self.processing_mode = tk.StringVar(value="AI Editing")
         self.last_extracted_file = None
         self.delete_previous_var = tk.BooleanVar(value=True)
+        self.output_views = []
+        self.open_location_buttons = []
         self.preferences = self.load_preferences()
         self.visible_programs = list(self.preferences.get("visible_programs", PROGRAM_ORDER))
         self.custom_hotkeys = dict(self.preferences.get("custom_hotkeys", {}))
@@ -548,7 +551,7 @@ class MuseScoreExtractorApp:
             "selected_program": "musescore",
             "visible_programs": list(PROGRAM_ORDER),
             "custom_hotkeys": {},
-            "processing_mode": "AI Editing",
+            "active_tab": TAB_CLIPBOARD,
         }
 
         if not CONFIG_FILE.exists():
@@ -591,6 +594,8 @@ class MuseScoreExtractorApp:
         if selected_program not in visible_programs:
             selected_program = visible_programs[0]
         merged["selected_program"] = selected_program
+        if merged.get("active_tab") not in {TAB_CLIPBOARD, TAB_AI_EDITING, TAB_SETTINGS}:
+            merged["active_tab"] = TAB_CLIPBOARD
 
         custom_hotkeys = merged.get("custom_hotkeys")
         if not isinstance(custom_hotkeys, dict):
@@ -655,7 +660,7 @@ class MuseScoreExtractorApp:
             "selected_program": selected_program,
             "visible_programs": list(self.visible_programs),
             "custom_hotkeys": dict(self.custom_hotkeys),
-            "processing_mode": self.processing_mode.get(),
+            "active_tab": self._get_active_tab_id(),
         }
         try:
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -681,17 +686,34 @@ class MuseScoreExtractorApp:
         elif selected_program not in PROGRAM_PROFILES:
             selected_program = "musescore"
         self.selected_program_var.set(selected_program)
-        saved_mode = self.preferences.get("processing_mode", "AI Editing")
-        if saved_mode not in PROCESSING_MODES:
-            saved_mode = "AI Editing"
-        self.processing_mode.set(saved_mode)
         self._refresh_program_dropdown()
+        self._select_tab_by_id(self.preferences.get("active_tab", TAB_CLIPBOARD))
         self._update_program_dependent_ui()
 
         if self.preferences.get("watching"):
             folder = self.watch_folder.get().strip()
             if folder and os.path.exists(folder):
                 self.root.after(200, self.toggle_watch)
+
+    def _get_active_tab_id(self):
+        if not hasattr(self, "notebook"):
+            return TAB_CLIPBOARD
+        selected = self.notebook.select()
+        if selected == str(self.ai_tab):
+            return TAB_AI_EDITING
+        if selected == str(self.settings_tab):
+            return TAB_SETTINGS
+        return TAB_CLIPBOARD
+
+    def _select_tab_by_id(self, tab_id):
+        if not hasattr(self, "notebook"):
+            return
+        if tab_id == TAB_AI_EDITING:
+            self.notebook.select(self.ai_tab)
+        elif tab_id == TAB_SETTINGS:
+            self.notebook.select(self.settings_tab)
+        else:
+            self.notebook.select(self.clipboard_tab)
 
     def create_widgets(self):
         self.root.columnconfigure(0, weight=1)
@@ -711,34 +733,69 @@ class MuseScoreExtractorApp:
             pid: tk.StringVar(value=self.custom_hotkeys.get(pid, "")) for pid in PROGRAM_ORDER
         }
 
-        notebook = ttk.Notebook(main_frame)
-        notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        self.main_tab = ttk.Frame(notebook, padding="10")
-        self.settings_tab = ttk.Frame(notebook, padding="10")
-        notebook.add(self.main_tab, text="Main")
-        notebook.add(self.settings_tab, text="Settings")
+        self.clipboard_tab = ttk.Frame(self.notebook, padding="10")
+        self.ai_tab = ttk.Frame(self.notebook, padding="10")
+        self.settings_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.clipboard_tab, text="Clipboard")
+        self.notebook.add(self.ai_tab, text="AI Editing")
+        self.notebook.add(self.settings_tab, text="Settings")
 
-        self._build_main_tab()
+        self._build_clipboard_tab()
+        self._build_ai_tab()
         self._build_settings_tab()
 
         self.selected_program_dropdown.bind("<<ComboboxSelected>>", self._on_selected_program_changed)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._refresh_program_dropdown()
         self._update_program_dependent_ui()
 
-    def _build_main_tab(self):
-        main_tab = self.main_tab
-        main_tab.columnconfigure(0, weight=1)
-        main_tab.rowconfigure(2, weight=1)
+    def _build_output_panel(self, parent):
+        output_frame = ttk.LabelFrame(parent, text="Output", padding="10")
+        output_frame.columnconfigure(0, weight=1)
+        output_frame.rowconfigure(0, weight=1)
+
+        output_text = scrolledtext.ScrolledText(output_frame, height=15, width=80, wrap=tk.WORD)
+        output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.output_views.append(output_text)
+
+        button_frame = ttk.Frame(output_frame)
+        button_frame.grid(row=1, column=0, pady=5)
+
+        ttk.Button(button_frame, text="Clear Output", command=self.clear_output).grid(row=0, column=0, padx=5)
+
+        open_location_button = ttk.Button(
+            button_frame,
+            text="Open File Location",
+            command=self.open_file_location,
+            state="disabled",
+        )
+        open_location_button.grid(row=0, column=1, padx=5)
+        self.open_location_buttons.append(open_location_button)
+
+        ttk.Checkbutton(
+            button_frame,
+            text="Auto-delete previous extraction",
+            variable=self.delete_previous_var,
+        ).grid(row=0, column=2, padx=5)
+
+        return output_frame, output_text, open_location_button
+
+    def _build_clipboard_tab(self):
+        clipboard_tab = self.clipboard_tab
+        clipboard_tab.columnconfigure(0, weight=1)
+        clipboard_tab.rowconfigure(2, weight=1)
 
         title_label = ttk.Label(
-            main_tab,
+            clipboard_tab,
             text="Music Clipboard Extractor",
             font=("Arial", 16, "bold"),
         )
         title_label.grid(row=0, column=0, pady=(0, 20), sticky=tk.W)
 
-        watch_frame = ttk.LabelFrame(main_tab, text="Auto-Process Saved Selections", padding="10")
+        watch_frame = ttk.LabelFrame(clipboard_tab, text="Auto-Process Saved Selections", padding="10")
         watch_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
         watch_frame.columnconfigure(1, weight=1)
 
@@ -758,16 +815,6 @@ class MuseScoreExtractorApp:
         )
         format_dropdown.current(0)
         format_dropdown.grid(row=0, column=1, padx=5)
-        ttk.Label(format_frame, text="Mode:").grid(row=0, column=2, padx=(20, 5))
-        mode_dropdown = ttk.Combobox(
-            format_frame,
-            textvariable=self.processing_mode,
-            values=PROCESSING_MODES,
-            state="readonly",
-            width=18,
-        )
-        mode_dropdown.grid(row=0, column=3, padx=5)
-        mode_dropdown.bind("<<ComboboxSelected>>", self._on_processing_mode_changed)
 
         program_frame = ttk.Frame(watch_frame)
         program_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
@@ -842,35 +889,38 @@ class MuseScoreExtractorApp:
         self.watch_status_label = ttk.Label(watch_frame, text="Status: Not watching", foreground="gray")
         self.watch_status_label.grid(row=5, column=0, columnspan=3)
 
-        self.instructions_label = ttk.Label(watch_frame, justify=tk.LEFT, foreground="gray")
-        self.instructions_label.grid(row=6, column=0, columnspan=3, pady=10, sticky=tk.W)
+        self.clipboard_instructions_label = ttk.Label(watch_frame, justify=tk.LEFT, foreground="gray")
+        self.clipboard_instructions_label.grid(row=6, column=0, columnspan=3, pady=10, sticky=tk.W)
 
-        output_frame = ttk.LabelFrame(main_tab, text="Output", padding="10")
+        output_frame, output_text, open_location_button = self._build_output_panel(clipboard_tab)
         output_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        output_frame.columnconfigure(0, weight=1)
-        output_frame.rowconfigure(0, weight=1)
+        self.output_text = output_text
+        self.open_location_button = open_location_button
 
-        self.output_text = scrolledtext.ScrolledText(output_frame, height=15, width=80, wrap=tk.WORD)
-        self.output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    def _build_ai_tab(self):
+        ai_tab = self.ai_tab
+        ai_tab.columnconfigure(0, weight=1)
+        ai_tab.rowconfigure(2, weight=1)
 
-        button_frame = ttk.Frame(output_frame)
-        button_frame.grid(row=1, column=0, pady=5)
-
-        ttk.Button(button_frame, text="Clear Output", command=self.clear_output).grid(row=0, column=0, padx=5)
-
-        self.open_location_button = ttk.Button(
-            button_frame,
-            text="Open File Location",
-            command=self.open_file_location,
-            state="disabled",
+        title_label = ttk.Label(
+            ai_tab,
+            text="AI Editing",
+            font=("Arial", 16, "bold"),
         )
-        self.open_location_button.grid(row=0, column=1, padx=5)
+        title_label.grid(row=0, column=0, pady=(0, 20), sticky=tk.W)
 
-        ttk.Checkbutton(
-            button_frame,
-            text="Auto-delete previous extraction",
-            variable=self.delete_previous_var,
-        ).grid(row=0, column=2, padx=5)
+        ai_frame = ttk.LabelFrame(ai_tab, text="AI Flow", padding="10")
+        ai_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+        ai_frame.columnconfigure(0, weight=1)
+
+        self.ai_mode_label = ttk.Label(ai_frame, justify=tk.LEFT, foreground="gray")
+        self.ai_mode_label.grid(row=0, column=0, sticky=tk.W, pady=(0, 6))
+
+        self.ai_instructions_label = ttk.Label(ai_frame, justify=tk.LEFT, foreground="gray")
+        self.ai_instructions_label.grid(row=1, column=0, sticky=tk.W)
+
+        output_frame, _, _ = self._build_output_panel(ai_tab)
+        output_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
 
     def _build_settings_tab(self):
         settings_tab = self.settings_tab
@@ -946,21 +996,18 @@ class MuseScoreExtractorApp:
         self._update_program_dependent_ui()
         self.save_preferences()
 
-    def _on_processing_mode_changed(self, _event=None):
+    def _on_tab_changed(self, _event=None):
         self._update_program_dependent_ui()
         self.save_preferences()
+
+    def _is_ai_editing_active(self):
+        return self._get_active_tab_id() == TAB_AI_EDITING
 
     def _build_instruction_text(self):
         selected_program = self._get_selected_program_id()
         selected_label = self._get_program_label(selected_program)
         effective_hotkey, hotkey_error = self._resolve_effective_hotkey(selected_program)
         shortcut_hint = _format_hotkey_label(effective_hotkey) if effective_hotkey else f"Not configured ({hotkey_error})"
-        mode = self.processing_mode.get() if hasattr(self, "processing_mode") else "AI Editing"
-        mode_hint = (
-            "Mode: AI Editing (opens MuseScore + sends prompt to Claude + waits for final MIDI export)"
-            if mode == "AI Editing"
-            else "Mode: Simple Extraction (no Claude automation; only extraction/clipboard flow)"
-        )
         return (
             "Instructions:\n"
             "1. Auto Mode:\n"
@@ -969,16 +1016,35 @@ class MuseScoreExtractorApp:
             f"   - Click 'Trigger Save/Export in {selected_label}' (or use the app's own save/export path)\n"
             "   - Save in the watch folder\n"
             f"   - Shortcut reminder for {selected_label}: {shortcut_hint}\n"
-            "\n"
-            f"{mode_hint}\n"
-            "Note: Watched-file AI opening remains MuseScore-only."
+            "\nMode: Clipboard (extraction/clipboard workflow only)"
+        )
+
+    def _build_ai_instruction_text(self):
+        selected_program = self._get_selected_program_id()
+        selected_label = self._get_program_label(selected_program)
+        return (
+            "AI Editing Mode:\n"
+            "- New watched files still run extraction first.\n"
+            "- Claude automation runs only while this tab is active.\n"
+            f"- Save/export trigger target program: {selected_label}\n"
+            "- The app waits for final exported MIDI before revealing it."
         )
 
     def _update_program_dependent_ui(self):
         selected_program = self._get_selected_program_id()
         selected_label = self._get_program_label(selected_program)
         self.save_selection_button.config(text=f"Trigger Save/Export in {selected_label}")
-        self.instructions_label.config(text=self._build_instruction_text())
+        self.clipboard_instructions_label.config(text=self._build_instruction_text())
+        ai_active = self._is_ai_editing_active()
+        self.ai_mode_label.config(
+            text=(
+                "Status: AI Editing ACTIVE (Claude automation enabled)"
+                if ai_active
+                else "Status: AI Editing inactive (select this tab to enable Claude automation)"
+            ),
+            foreground=("green" if ai_active else "gray"),
+        )
+        self.ai_instructions_label.config(text=self._build_ai_instruction_text())
 
     def _reset_custom_hotkey(self, program_id):
         self.custom_hotkey_vars[program_id].set("")
@@ -1029,12 +1095,16 @@ class MuseScoreExtractorApp:
             self.save_preferences()
 
     def log(self, message):
-        self.output_text.insert(tk.END, message + "\n")
-        self.output_text.see(tk.END)
+        targets = self.output_views if self.output_views else [self.output_text]
+        for view in targets:
+            view.insert(tk.END, message + "\n")
+            view.see(tk.END)
         self.root.update_idletasks()
 
     def clear_output(self):
-        self.output_text.delete(1.0, tk.END)
+        targets = self.output_views if self.output_views else [self.output_text]
+        for view in targets:
+            view.delete(1.0, tk.END)
 
     def _reveal_file_in_folder(self, file_path):
         """Reveal a file in the system file manager (Finder/Explorer) without changing app state."""
@@ -1175,7 +1245,10 @@ class MuseScoreExtractorApp:
         if self.delete_previous_var.get():
             self._delete_previous_extracted_file(extracted_path)
         self.last_extracted_file = extracted_path
-        self.root.after(0, lambda: self.open_location_button.config(state="normal"))
+        self.root.after(
+            0,
+            lambda: [btn.config(state="normal") for btn in (self.open_location_buttons or [self.open_location_button])],
+        )
         self.root.after(0, self.open_file_location)
 
     def _show_error_async(self, title, message):
@@ -1446,8 +1519,8 @@ class MuseScoreExtractorApp:
         elif extension in (".mid", ".midi"):
             self.log(f"Skipping extraction for MIDI input: {os.path.basename(file_path)}")
 
-        if self.processing_mode.get() == "Simple Extraction":
-            self.log(f"Simple Extraction mode: skipping Claude automation for {os.path.basename(file_path)}")
+        if not self._is_ai_editing_active():
+            self.log(f"Clipboard mode: skipping Claude automation for {os.path.basename(file_path)}")
             return
 
         if not IS_MACOS:
